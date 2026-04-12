@@ -1,0 +1,5 @@
+streamlit>=1.30
+playwright>=1.40
+PyPDF2>=3.0
+requests>=2.31
+python-dotenv>=1.0
