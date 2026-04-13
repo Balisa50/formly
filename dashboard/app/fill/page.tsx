@@ -56,11 +56,16 @@ export default function FillFormPage() {
       setMatches(result.matches);
 
       const autoFilled = result.auto_filled;
-      const unknown = result.matches.filter((m: any) => m.match_type === "unknown" && !m.needs_essay);
+      const unknown = result.matches.filter((m: any) => m.match_type === "unknown" && !m.needs_essay && m.field_type !== "file");
       const essays = result.matches.filter((m: any) => m.needs_essay);
+      const skipped = result.matches.filter((m: any) => m.match_type === "skipped" || m.field_type === "file");
 
       if (autoFilled > 0) {
         addChat("assistant", `Filled ${autoFilled} fields from your profile.`);
+      }
+
+      if (skipped.length > 0) {
+        addChat("assistant", `${skipped.length} file upload field${skipped.length > 1 ? "s" : ""} detected — you'll need to upload ${skipped.length > 1 ? "those" : "that"} directly on the form.`);
       }
 
       if (unknown.length > 0) {

@@ -96,6 +96,27 @@ def delete_profile_field(key: str):
     return {"ok": True}
 
 
+# ─── Photo Upload ──────────────────────────────────────
+
+@app.post("/api/profile/photo")
+async def upload_photo(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(400, "No file provided")
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ("jpg", "jpeg", "png", "webp"):
+        raise HTTPException(400, "Only JPG, PNG, or WebP images are supported")
+
+    photo_path = UPLOADS_DIR / f"profile_photo.{ext}"
+    with open(photo_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    # Save reference in profile
+    db.set_profile("photo_url", str(photo_path), "personal")
+    db.set_profile("has_photo", "true", "personal")
+
+    return {"ok": True, "url": str(photo_path)}
+
+
 # ─── CV Upload ──────────────────────────────────────────
 
 @app.post("/api/profile/cv")

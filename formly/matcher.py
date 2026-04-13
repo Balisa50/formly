@@ -116,14 +116,30 @@ Match each form field to the appropriate profile data. Return the JSON array."""
     matches = []
     for m in matches_raw:
         value = m.get("value")
+        field_type = m.get("field_type", "text")
+
         # SAFETY: Never allow CSS selectors or technical garbage as values
         if value and isinstance(value, str):
             if value.startswith("#") or value.startswith(".") or "input[" in value or "select-" in value or value.startswith("css-"):
-                value = None  # Force to unknown — will be asked or inferred
+                value = None
+
+        # Skip file upload fields — agent can't handle these
+        if field_type == "file":
+            matches.append(FieldMatch(
+                selector=m["selector"],
+                field_type=field_type,
+                label=m.get("label", ""),
+                match_type="skipped",
+                profile_key=None,
+                value=None,
+                confidence=0,
+                note="File upload — must be done manually on the form",
+            ))
+            continue
 
         matches.append(FieldMatch(
             selector=m["selector"],
-            field_type=m.get("field_type", "text"),
+            field_type=field_type,
             label=m.get("label", ""),
             match_type=m.get("match_type", "unknown") if value is not None or m.get("needs_essay") else "unknown",
             profile_key=m.get("profile_key"),
