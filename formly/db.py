@@ -12,17 +12,6 @@ from .config import DB_PATH
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-# URL-encode special chars in password if needed
-if DATABASE_URL and "!" in DATABASE_URL:
-    from urllib.parse import urlparse, quote, urlunparse
-    parsed = urlparse(DATABASE_URL)
-    if parsed.password:
-        encoded_pw = quote(parsed.password, safe="")
-        netloc = f"{parsed.username}:{encoded_pw}@{parsed.hostname}"
-        if parsed.port:
-            netloc += f":{parsed.port}"
-        DATABASE_URL = urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
-
 # ─── Detect database mode ──────────────────────────────
 USE_POSTGRES = bool(DATABASE_URL)
 
@@ -225,19 +214,22 @@ def _fetchone(conn, sql: str, params: tuple = ()) -> dict | None:
 
 
 def init_db() -> None:
-    if USE_POSTGRES:
-        conn = psycopg.connect(DATABASE_URL, autocommit=True)
-        try:
-            for statement in PG_SCHEMA.strip().split(";"):
-                statement = statement.strip()
-                if statement:
-                    conn.execute(statement + ";")
-        finally:
+    try:
+        if USE_POSTGRES:
+            conn = psycopg.connect(DATABASE_URL, autocommit=True)
+            try:
+                for statement in PG_SCHEMA.strip().split(";"):
+                    statement = statement.strip()
+                    if statement:
+                        conn.execute(statement + ";")
+            finally:
+                conn.close()
+        else:
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.executescript(SQLITE_SCHEMA)
             conn.close()
-    else:
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.executescript(SQLITE_SCHEMA)
-        conn.close()
+    except Exception as e:
+        print(f"[db] init_db warning: {e} — tables will be created on first request")
 
 
 # ─── Profile ────────────────────────────────────────────

@@ -2,7 +2,7 @@ services:
   - type: web
     name: formly-api
     runtime: python
-    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    buildCommand: pip install -r requirements.txt && (playwright install --with-deps chromium || playwright install chromium || echo "Playwright browser install skipped")
     startCommand: uvicorn formly.api:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: GROQ_API_KEY

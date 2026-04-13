@@ -13,7 +13,13 @@ from pydantic import BaseModel
 from . import db
 from .config import UPLOADS_DIR
 from .cv_parser import parse_cv
-from .form_reader import read_form, FormField
+try:
+    from .form_reader import read_form, FormField
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    PLAYWRIGHT_AVAILABLE = False
+    read_form = None  # type: ignore
+    FormField = None  # type: ignore
 from .matcher import match_fields, get_unmatched, get_essay_fields, FieldMatch
 from .gap_filler import generate_question, save_answer
 from .essay_writer import write_essay
@@ -191,6 +197,8 @@ class ScanRequest(BaseModel):
 
 @app.post("/api/forms/scan")
 def scan_form(req: ScanRequest):
+    if not PLAYWRIGHT_AVAILABLE:
+        raise HTTPException(503, "Form scanning is temporarily unavailable — Playwright browser not installed on this server.")
     try:
         fields, page_context = read_form(req.url)
         return {
