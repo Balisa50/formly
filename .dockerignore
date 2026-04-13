@@ -1,0 +1,10 @@
+dashboard/node_modules
+dashboard/.next
+dashboard/.vercel
+__pycache__
+*.pyc
+.git
+.env
+data/
+*.sqlite
+*.db

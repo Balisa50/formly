@@ -5,7 +5,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy the Python package (this is what we need fresh each deploy)
+COPY formly/ ./formly/
+COPY Dockerfile ./Dockerfile
 
 RUN mkdir -p data/uploads
 
