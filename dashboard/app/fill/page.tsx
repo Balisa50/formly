@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { api } from "../lib/api";
 
-type Step = "input" | "scanning" | "matching" | "gaps" | "essays" | "preview" | "done";
+type Step = "input" | "scanning" | "matching" | "autofill" | "gaps" | "essays" | "preview" | "done";
 type ChatMsg = { role: "assistant" | "user"; content: string };
 
 export default function FillFormPage() {
@@ -15,7 +15,6 @@ export default function FillFormPage() {
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [gapQueue, setGapQueue] = useState<any[]>([]);
   const [gapIndex, setGapIndex] = useState(0);
-  const [currentQuestion, setCurrentQuestion] = useState("");
   const [userInput, setUserInput] = useState("");
   const [essayDrafts, setEssayDrafts] = useState<Record<number, string>>({});
   const [error, setError] = useState("");
@@ -29,19 +28,19 @@ export default function FillFormPage() {
     setChat((prev) => [...prev, { role, content }]);
   }
 
-  // Step 1: Scan
+  // Step 1: Scan the form
   async function handleScan() {
     if (!url.trim()) return;
     setStep("scanning");
     setError("");
     setChat([]);
-    addChat("assistant", `Reading the form at ${url}...`);
+    addChat("assistant", `Opening the form and reading all fields...`);
 
     try {
       const result = await api.scanForm(url);
       setFields(result.fields);
       setPageContext(result.page_context);
-      addChat("assistant", `Found ${result.count} fields. Now matching to your profile...`);
+      addChat("assistant", `Found ${result.count} fields. Matching them to your profile...`);
       setStep("matching");
       await handleMatch(result.fields, result.page_context);
     } catch (err) {
@@ -50,27 +49,29 @@ export default function FillFormPage() {
     }
   }
 
-  // Step 2: Match
+  // Step 2: Match fields to profile
   async function handleMatch(scannedFields: any[], ctx: string) {
     try {
       const result = await api.matchFields(url, scannedFields, ctx);
       setMatches(result.matches);
 
-      let msg = `Matched ${result.auto_filled} fields from your profile.`;
-      if (result.needs_input > 0) msg += ` I need to ask you about ${result.needs_input} more.`;
-      if (result.needs_essay > 0) msg += ` ${result.needs_essay} need written responses — I'll draft those for you.`;
-      addChat("assistant", msg);
+      const autoFilled = result.auto_filled;
+      const unknown = result.matches.filter((m: any) => m.match_type === "unknown" && !m.needs_essay);
+      const essays = result.matches.filter((m: any) => m.needs_essay);
 
-      // Find unmatched
-      const unmatched = result.matches.filter((m: any) => m.match_type === "unknown" && !m.needs_essay);
-      setGapQueue(unmatched);
+      if (autoFilled > 0) {
+        addChat("assistant", `Filled ${autoFilled} fields from your profile.`);
+      }
 
-      if (unmatched.length > 0) {
-        setStep("gaps");
-        await askNextGap(unmatched, 0, ctx);
-      } else if (result.needs_essay > 0) {
+      if (unknown.length > 0) {
+        addChat("assistant", `${unknown.length} fields I'm not sure about — let me try to figure them out...`);
+        setStep("autofill");
+        await handleAutoFill(result.matches, unknown, ctx, essays.length);
+      } else if (essays.length > 0) {
+        addChat("assistant", `${essays.length} fields need written responses — drafting those now...`);
         setStep("essays");
       } else {
+        addChat("assistant", "All fields filled! Review everything below.");
         setStep("preview");
       }
     } catch (err) {
@@ -79,14 +80,59 @@ export default function FillFormPage() {
     }
   }
 
-  // Step 3: Gap filling
+  // Step 3: Auto-fill unknown fields using AI inference
+  async function handleAutoFill(allMatches: any[], unknown: any[], ctx: string, essayCount: number) {
+    try {
+      const result = await api.autoFill(unknown, ctx);
+      const filled = result.auto_filled || [];
+      const remaining = result.still_unknown || [];
+
+      // Update matches with auto-filled values
+      if (filled.length > 0) {
+        const filledMap = new Map(filled.map((f: any) => [f.selector, f]));
+        setMatches((prev) =>
+          prev.map((m) => {
+            const fill = filledMap.get(m.selector);
+            if (fill) return { ...m, value: fill.value, confidence: fill.confidence, match_type: "inferred" };
+            return m;
+          })
+        );
+        addChat("assistant", `Figured out ${filled.length} more fields on my own. ${filled.map((f: any) => f.reason).filter(Boolean).join(". ")}`);
+      }
+
+      if (remaining.length > 0) {
+        addChat("assistant", `I still need your help with ${remaining.length} field${remaining.length > 1 ? "s" : ""}.`);
+        setGapQueue(remaining);
+        setGapIndex(0);
+        setStep("gaps");
+        await askNextGap(remaining, 0, ctx);
+      } else if (essayCount > 0) {
+        addChat("assistant", "Now drafting written responses...");
+        setStep("essays");
+      } else {
+        addChat("assistant", "All fields filled! Review everything below.");
+        setStep("preview");
+      }
+    } catch {
+      // Fallback: go to gap filling for all unknown
+      if (unknown.length > 0) {
+        setGapQueue(unknown);
+        setGapIndex(0);
+        setStep("gaps");
+        await askNextGap(unknown, 0, ctx);
+      }
+    }
+  }
+
+  // Step 4: Ask user about remaining gaps
   async function askNextGap(queue: any[], idx: number, ctx: string) {
     if (idx >= queue.length) {
-      addChat("assistant", "Great, I have everything I need! Let me check if there are any written responses to draft...");
+      addChat("assistant", "Thanks! Let me check if any written responses are needed...");
       const essayFields = matches.filter((m) => m.needs_essay);
       if (essayFields.length > 0) {
         setStep("essays");
       } else {
+        addChat("assistant", "All done! Review your answers below.");
         setStep("preview");
       }
       return;
@@ -95,11 +141,13 @@ export default function FillFormPage() {
     const field = queue[idx];
     try {
       const { question } = await api.getGapQuestion(field.label, field.field_type, field.selector, ctx);
-      setCurrentQuestion(question);
       addChat("assistant", question);
     } catch {
-      addChat("assistant", `This form needs your "${field.label}" — what should I put?`);
-      setCurrentQuestion(`What should I put for "${field.label}"?`);
+      // Fallback — never show selector
+      const label = field.label?.startsWith("#") || field.label?.includes("select-")
+        ? "a required field on this form"
+        : field.label;
+      addChat("assistant", `I need to know: what should I put for "${label}"?`);
     }
   }
 
@@ -121,14 +169,14 @@ export default function FillFormPage() {
       )
     );
 
-    addChat("assistant", "Got it — saved to your profile so I'll never ask again.");
+    addChat("assistant", "Got it — saved so I won't ask again next time.");
 
     const nextIdx = gapIndex + 1;
     setGapIndex(nextIdx);
     await askNextGap(gapQueue, nextIdx, pageContext);
   }
 
-  // Step 4: Essays
+  // Step 5: Essays
   async function generateEssays() {
     const essayFields = matches.filter((m) => m.needs_essay);
     const drafts: Record<number, string> = {};
@@ -157,7 +205,7 @@ export default function FillFormPage() {
     <>
       <h1 className="text-2xl font-bold mb-1">Fill a Form</h1>
       <p className="text-sm text-text-muted mb-6">
-        Enter any application form URL — job, scholarship, university, or visa. Formly reads every field and fills it for you.
+        Paste any application form URL — Formly reads every field, matches your profile, and fills it automatically.
       </p>
 
       {/* URL Input */}
@@ -185,12 +233,12 @@ export default function FillFormPage() {
       {step === "scanning" && (
         <div className="bg-surface rounded-xl border border-border p-8 text-center">
           <div className="w-8 h-8 border-3 border-border border-t-accent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-text-muted text-sm">Reading form fields...</p>
+          <p className="text-text-muted text-sm">Reading form fields — this may take a moment...</p>
         </div>
       )}
 
-      {/* Chat area (gaps + matching) */}
-      {(step === "gaps" || step === "matching") && (
+      {/* Chat area */}
+      {["gaps", "matching", "autofill"].includes(step) && (
         <div className="bg-surface rounded-xl border border-border">
           <div className="p-4 max-h-96 overflow-y-auto space-y-3">
             {chat.map((msg, i) => (
@@ -206,6 +254,14 @@ export default function FillFormPage() {
                 </div>
               </div>
             ))}
+            {step === "autofill" && (
+              <div className="flex justify-start">
+                <div className="bg-surface-elevated rounded-xl px-4 py-2.5 text-sm text-text-secondary flex items-center gap-2">
+                  <div className="w-4 h-4 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
+                  Thinking...
+                </div>
+              </div>
+            )}
             <div ref={chatEndRef} />
           </div>
           {step === "gaps" && (
@@ -230,7 +286,7 @@ export default function FillFormPage() {
       {step === "essays" && (
         <div className="bg-surface rounded-xl border border-border p-5 space-y-4">
           <h2 className="font-semibold">Written Responses</h2>
-          <p className="text-sm text-text-muted">I&apos;ve drafted these based on your profile. Edit anything before continuing.</p>
+          <p className="text-sm text-text-muted">Drafted from your profile. Edit anything before continuing.</p>
           {matches
             .filter((m) => m.needs_essay)
             .map((field) => {
@@ -241,7 +297,7 @@ export default function FillFormPage() {
                   {essayDrafts[idx] === undefined ? (
                     <div className="flex items-center gap-2 text-sm text-accent">
                       <div className="w-4 h-4 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
-                      Writing a draft for you...
+                      Writing a draft...
                     </div>
                   ) : (
                     <textarea
@@ -280,18 +336,22 @@ export default function FillFormPage() {
         <div className="space-y-4">
           <div className="bg-surface rounded-xl border border-border p-5">
             <h2 className="font-semibold mb-2">Review All Answers</h2>
-            <p className="text-xs text-text-muted mb-4">Edit anything before submitting. Nothing is sent until you approve.</p>
+            <p className="text-xs text-text-muted mb-4">Edit anything before submitting. Green = high confidence. Yellow = moderate. Red = low.</p>
 
             <div className="space-y-3">
               {matches
                 .filter((m) => m.value)
                 .map((m, i) => {
-                  const color = m.confidence >= 0.8 ? "text-green" : m.confidence >= 0.5 ? "text-amber-400" : "text-red";
+                  const dotColor = m.confidence >= 0.8 ? "bg-green" : m.confidence >= 0.5 ? "bg-amber-400" : "bg-red";
+                  // Clean label for display — never show selectors
+                  const displayLabel = m.label?.startsWith("#") || m.label?.includes("select-") || m.label?.includes("input[")
+                    ? (m.note || m.profile_key || "Form field")
+                    : m.label;
                   return (
                     <div key={i} className="flex gap-3 items-start">
-                      <span className={`w-2 h-2 rounded-full mt-2.5 shrink-0 ${color}`} style={{ backgroundColor: "currentColor" }} />
+                      <span className={`w-2 h-2 rounded-full mt-2.5 shrink-0 ${dotColor}`} />
                       <div className="flex-1">
-                        <p className="text-xs text-text-muted mb-1">{m.label}</p>
+                        <p className="text-xs text-text-muted mb-1">{displayLabel}</p>
                         {m.value.length > 100 ? (
                           <textarea
                             className="input"
@@ -345,7 +405,7 @@ export default function FillFormPage() {
             </svg>
           </div>
           <p className="font-bold text-lg mb-2">Application Complete!</p>
-          <p className="text-text-muted text-sm mb-5">Your answers are saved. Check the History page for your records.</p>
+          <p className="text-text-muted text-sm mb-5">All answers saved. Check History for your records.</p>
           <button
             onClick={() => {
               setStep("input");

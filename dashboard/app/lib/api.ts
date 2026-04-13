@@ -57,6 +57,10 @@ export const api = {
   matchFields: (url: string, fields: any[], page_context: string) =>
     request<{ matches: any[]; auto_filled: number; needs_input: number; needs_essay: number }>("/api/forms/match", { method: "POST", body: JSON.stringify({ url, fields, page_context }) }),
 
+  // Auto-fill (smart inference for unknown fields)
+  autoFill: (matches: any[], page_context = "") =>
+    request<{ auto_filled: any[]; still_unknown: any[] }>("/api/forms/autofill", { method: "POST", body: JSON.stringify({ matches, page_context }) }),
+
   // Gap filling
   getGapQuestion: (label: string, field_type: string, selector: string, page_context = "") =>
     request<{ question: string }>("/api/forms/gap-question", { method: "POST", body: JSON.stringify({ label, field_type, selector, page_context }) }),

@@ -21,7 +21,7 @@ except Exception:
     read_form = None  # type: ignore
     FormField = None  # type: ignore
 from .matcher import match_fields, get_unmatched, get_essay_fields, FieldMatch
-from .gap_filler import generate_question, save_answer
+from .gap_filler import generate_question, save_answer, try_autofill
 from .essay_writer import write_essay
 
 app = FastAPI(title="Formly", description="Autonomous form filling agent", version="0.1.0")
@@ -267,6 +267,50 @@ def match_form_fields(req: MatchRequest):
         }
     except Exception as e:
         raise HTTPException(500, f"Matching failed: {e}")
+
+
+# ─── Auto-Fill (Smart Inference) ───────────────────────
+
+class AutoFillRequest(BaseModel):
+    matches: list[dict]
+    page_context: str = ""
+
+
+@app.post("/api/forms/autofill")
+def autofill_unknown(req: AutoFillRequest):
+    """Try to auto-fill unknown fields using AI inference before asking the user."""
+    unknown = [
+        FieldMatch(
+            selector=m["selector"],
+            field_type=m.get("field_type", "text"),
+            label=m.get("label", ""),
+            match_type="unknown",
+            profile_key=None,
+            value=None,
+            confidence=0,
+            note=m.get("note", ""),
+        )
+        for m in req.matches
+        if m.get("match_type") == "unknown" and not m.get("needs_essay")
+    ]
+
+    if not unknown:
+        return {"auto_filled": [], "still_unknown": []}
+
+    try:
+        filled, remaining = try_autofill(unknown, req.page_context)
+        return {
+            "auto_filled": [
+                {"selector": f.selector, "value": f.value, "confidence": f.confidence, "reason": f.note}
+                for f in filled
+            ],
+            "still_unknown": [
+                {"selector": f.selector, "label": f.label, "field_type": f.field_type, "note": f.note}
+                for f in remaining
+            ],
+        }
+    except Exception as e:
+        return {"auto_filled": [], "still_unknown": [{"selector": m.selector, "label": m.label, "field_type": m.field_type, "note": m.note} for m in unknown]}
 
 
 # ─── Gap Filling ────────────────────────────────────────
