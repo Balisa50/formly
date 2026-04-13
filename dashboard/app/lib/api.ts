@@ -75,6 +75,13 @@ export const api = {
   fillForm: (url: string, matches: any[]) =>
     request<{ filled: number; skipped: number; pages_navigated: number; screenshot: string; errors: string[] }>("/api/forms/fill", { method: "POST", body: JSON.stringify({ url, matches }) }),
 
+  // ── Unified Agent ─────────────────────────────────
+  agentStart: (url: string) =>
+    request<{ events: any[] }>("/api/agent/start", { method: "POST", body: JSON.stringify({ url }) }),
+
+  agentFill: (url: string, matches: any[], gapAnswers: Record<string, string> = {}) =>
+    request<{ events: any[] }>("/api/agent/fill", { method: "POST", body: JSON.stringify({ url, matches, gap_answers: gapAnswers }) }),
+
   // Applications
   listApplications: () => request<any[]>("/api/applications"),
   logApplication: (url: string, title = "", fields = {}) =>

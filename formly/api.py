@@ -399,7 +399,45 @@ def generate_essay(req: EssayRequest):
         raise HTTPException(500, f"Essay generation failed: {e}")
 
 
-# ─── Autonomous Form Filling ──────────────────────────
+# ─── Unified Agent ─────────────────────────────────────
+
+class AgentStartRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/agent/start")
+def agent_start(req: AgentStartRequest):
+    """Start the agent — reads form, matches profile, reports what it can fill and what it needs."""
+    if not PLAYWRIGHT_AVAILABLE:
+        raise HTTPException(503, "Agent unavailable — browser not installed")
+    from .agent import run_agent
+    try:
+        events = run_agent(req.url)
+        return {"events": [e.to_dict() for e in events]}
+    except Exception as e:
+        raise HTTPException(500, f"Agent failed: {e}")
+
+
+class AgentFillRequest(BaseModel):
+    url: str
+    matches: list[dict]
+    gap_answers: dict = {}
+
+
+@app.post("/api/agent/fill")
+def agent_fill(req: AgentFillRequest):
+    """Agent fills the form with all matches + user's gap answers."""
+    if not PLAYWRIGHT_AVAILABLE:
+        raise HTTPException(503, "Agent unavailable — browser not installed")
+    from .agent import fill_with_answers
+    try:
+        events = fill_with_answers(req.url, req.matches, req.gap_answers)
+        return {"events": [e.to_dict() for e in events]}
+    except Exception as e:
+        raise HTTPException(500, f"Agent fill failed: {e}")
+
+
+# ─── Legacy Form Filling (kept for compatibility) ─────
 
 class FillRequest(BaseModel):
     url: str
@@ -408,7 +446,7 @@ class FillRequest(BaseModel):
 
 @app.post("/api/forms/fill")
 def fill_form_endpoint(req: FillRequest):
-    """The actual agent — navigates to the form and fills everything autonomously."""
+    """Legacy endpoint — use /api/agent/fill instead."""
     if not PLAYWRIGHT_AVAILABLE:
         raise HTTPException(503, "Form filling unavailable — browser not installed")
     try:
