@@ -15,11 +15,13 @@ from .config import UPLOADS_DIR
 from .cv_parser import parse_cv
 try:
     from .form_reader import read_form, FormField
+    from .form_filler import fill_form as execute_fill
     PLAYWRIGHT_AVAILABLE = True
 except Exception:
     PLAYWRIGHT_AVAILABLE = False
     read_form = None  # type: ignore
     FormField = None  # type: ignore
+    execute_fill = None  # type: ignore
 from .matcher import match_fields, get_unmatched, get_essay_fields, FieldMatch
 from .gap_filler import generate_question, save_answer, try_autofill
 from .essay_writer import write_essay
@@ -395,6 +397,31 @@ def generate_essay(req: EssayRequest):
         return {"essay": essay}
     except Exception as e:
         raise HTTPException(500, f"Essay generation failed: {e}")
+
+
+# ─── Autonomous Form Filling ──────────────────────────
+
+class FillRequest(BaseModel):
+    url: str
+    matches: list[dict]
+
+
+@app.post("/api/forms/fill")
+def fill_form_endpoint(req: FillRequest):
+    """The actual agent — navigates to the form and fills everything autonomously."""
+    if not PLAYWRIGHT_AVAILABLE:
+        raise HTTPException(503, "Form filling unavailable — browser not installed")
+    try:
+        result = execute_fill(req.url, req.matches)
+        return {
+            "filled": result.filled,
+            "skipped": result.skipped,
+            "pages_navigated": result.pages_navigated,
+            "screenshot": result.screenshot_b64,
+            "errors": result.errors,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Form filling failed: {e}")
 
 
 # ─── Applications ───────────────────────────────────────
