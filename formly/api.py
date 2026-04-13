@@ -44,7 +44,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "formly"}
+    return {"status": "ok", "service": "formly", "version": "2.1.0"}
 
 
 # ─── Profile ────────────────────────────────────────────
