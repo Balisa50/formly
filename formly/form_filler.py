@@ -121,8 +121,34 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
                 # Text, email, textarea, etc. — find element then type
                 el = await _find_element(page, selector, label, ftype)
                 if not el:
+                    # Last resort: maybe it's a React Select that wasn't tagged as "select"
+                    if label:
+                        ok = await _fill_react_select_by_label(page, label, value)
+                        if ok:
+                            filled += 1
+                            continue
                     skipped += 1
                     errors.append(f"Could not find: {label}")
+                    continue
+
+                # Check if this element is inside a React Select container
+                is_react_select = await el.evaluate("""e => {
+                    const parent = e.closest('[class*="react-select"], [class*="css-"]');
+                    if (parent && parent.querySelector('[class*="indicatorContainer"], [class*="ValueContainer"]')) return true;
+                    if (e.getAttribute('role') === 'combobox') return true;
+                    if (e.id && e.id.includes('react-select')) return true;
+                    return false;
+                }""")
+
+                if is_react_select:
+                    el_id = await el.get_attribute("id")
+                    sel = f"#{el_id}" if el_id else selector
+                    ok = await _fill_react_select(page, sel, value)
+                    if ok:
+                        filled += 1
+                    else:
+                        skipped += 1
+                        errors.append(f"Could not fill React Select: {label}")
                     continue
 
                 if ftype == "date":
@@ -151,10 +177,22 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
         if validation_errors:
             errors.extend(validation_errors)
 
+        # Hide fixed overlays/ads that block the screenshot
+        await page.evaluate("""() => {
+            // Remove fixed position elements that cover content (ads, banners)
+            document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]').forEach(el => {
+                el.style.display = 'none';
+            });
+            // Also hide common ad containers
+            document.querySelectorAll('#fixedban, .adsbygoogle, [id*="google_ads"], iframe[src*="googleads"]').forEach(el => {
+                el.style.display = 'none';
+            });
+        }""")
+
         # Scroll to top and take screenshot
         await page.evaluate("window.scrollTo(0, 0)")
-        await asyncio.sleep(1)
-        screenshot = await page.screenshot(full_page=True)
+        await asyncio.sleep(1.5)
+        screenshot = await page.screenshot(full_page=True, type="png")
         screenshot_b64 = base64.b64encode(screenshot).decode()
 
         await browser.close()
@@ -221,12 +259,23 @@ async def _check_captcha(page: Page) -> bool:
 
 async def _find_element(page: Page, selector: str, label: str, ftype: str):
     """Find an element using multiple strategies — CSS selector, label text, name, placeholder."""
-    # Strategy 1: Direct CSS selector
+    # Strategy 1: Direct CSS selector (try visible first, then any state)
     if selector:
         try:
-            el = await page.wait_for_selector(selector, timeout=3000, state="visible")
+            el = await page.wait_for_selector(selector, timeout=2000, state="visible")
             if el:
                 return el
+        except Exception:
+            pass
+        # Maybe element exists but needs scroll — try without visible requirement
+        try:
+            el = await page.wait_for_selector(selector, timeout=2000, state="attached")
+            if el:
+                try:
+                    await el.scroll_into_view_if_needed()
+                    return el
+                except Exception:
+                    return el
         except Exception:
             pass
 
@@ -234,14 +283,12 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
     if label:
         try:
             el = await page.evaluate_handle("""(label) => {
-                // Find label element containing this text
                 const labels = [...document.querySelectorAll('label')];
                 const match = labels.find(l => l.textContent.trim().toLowerCase().includes(label.toLowerCase()));
                 if (match && match.htmlFor) {
                     return document.getElementById(match.htmlFor);
                 }
                 if (match) {
-                    // Check for input inside the label
                     return match.querySelector('input, textarea, select');
                 }
                 return null;
@@ -265,21 +312,31 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
     if label:
         try:
             el_handle = await page.evaluate_handle("""(label) => {
-                const allLabels = [...document.querySelectorAll('label, .label, span, p, td')];
+                const allLabels = [...document.querySelectorAll('label, .label, span, p, td, h4, h5, h6')];
                 const match = allLabels.find(l => {
                     const text = l.textContent.trim().toLowerCase();
                     return text.includes(label.toLowerCase()) && text.length < 100;
                 });
                 if (match) {
                     // Look for input/textarea in the same row/container
-                    const container = match.closest('tr, .form-group, .form-field, [class*="col"], .row, div');
+                    const container = match.closest('tr, .form-group, .form-field, [class*="col"], .row, .mb-3, .mb-4') || match.parentElement;
                     if (container) {
                         const input = container.querySelector('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]), textarea, select');
+                        if (input) return input;
+                    }
+                    // Walk UP further to find a bigger container
+                    const bigContainer = match.closest('tr, .form-group, .form-field, [class*="col"], .row, .mb-3') || match.parentElement?.parentElement;
+                    if (bigContainer) {
+                        const input = bigContainer.querySelector('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]), textarea, select');
                         if (input) return input;
                     }
                     // Try next sibling
                     const next = match.nextElementSibling;
                     if (next && ['INPUT', 'TEXTAREA', 'SELECT'].includes(next.tagName)) return next;
+                    if (next) {
+                        const inp = next.querySelector('input, textarea, select');
+                        if (inp) return inp;
+                    }
                     // Try parent's next
                     const parentNext = match.parentElement?.nextElementSibling;
                     if (parentNext) {
@@ -313,6 +370,18 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
             el = await page.query_selector(f'[aria-label*="{label}" i]')
             if el:
                 return el
+        except Exception:
+            pass
+
+    # Strategy 6: Find by ID containing label words
+    if label:
+        try:
+            id_guess = label.lower().replace(" ", "")
+            el = await page.query_selector(f'[id*="{id_guess}" i]')
+            if el:
+                tag = await el.evaluate("e => e.tagName.toLowerCase()")
+                if tag in ["input", "textarea", "select"]:
+                    return el
         except Exception:
             pass
 
@@ -509,13 +578,40 @@ async def _fill_react_select(page: Page, selector: str, value: str) -> bool:
 # ─── Radio buttons ─────────────────────────────────────
 
 async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool:
-    """Select the radio button matching the value. Uses multiple strategies."""
+    """Select the radio button matching the value. Uses multiple strategies.
+    Handles hidden radios (opacity:0) with custom label styling (like demoqa)."""
     val_lower = value.lower().strip()
 
-    # Strategy 1: Use the CSS selector
-    radios = await page.query_selector_all(selector) if selector else []
+    # Strategy 1: Click a label whose text matches the value
+    # This works even when radio inputs are hidden (custom-styled radios)
+    try:
+        clicked = await page.evaluate("""(value) => {
+            const val = value.toLowerCase().trim();
+            const labels = [...document.querySelectorAll('label')];
+            // Exact match first
+            let match = labels.find(l => l.textContent.trim().toLowerCase() === val);
+            // Then substring match
+            if (!match) match = labels.find(l => {
+                const t = l.textContent.trim().toLowerCase();
+                return t.includes(val) || val.includes(t);
+            });
+            if (match) {
+                match.scrollIntoView({block: 'center'});
+                match.click();
+                return true;
+            }
+            return false;
+        }""", value)
+        if clicked:
+            await asyncio.sleep(0.3)
+            return True
+    except Exception:
+        pass
 
-    # Strategy 2: If no radios found, search by type=radio broadly
+    # Strategy 2: Find all radios (including hidden ones) and click their labels
+    radios = []
+    if selector:
+        radios = await page.query_selector_all(selector)
     if not radios:
         radios = await page.query_selector_all('input[type="radio"]')
 
@@ -527,29 +623,42 @@ async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool
         }""")
 
         if label_text and (val_lower in label_text.lower() or label_text.lower() in val_lower):
-            await radio.scroll_into_view_if_needed()
-            await asyncio.sleep(random.uniform(0.2, 0.5))
             try:
-                label_el = await radio.evaluate_handle("""e => e.labels?.[0] || e.parentElement""")
-                await label_el.as_element().click()
+                # Click the associated label (works even when radio is hidden)
+                await radio.evaluate("""e => {
+                    const label = e.labels?.[0] || document.querySelector('label[for="' + e.id + '"]');
+                    if (label) { label.scrollIntoView({block: 'center'}); label.click(); return; }
+                    // If no label, force-click the radio via JS
+                    e.checked = true;
+                    e.dispatchEvent(new Event('change', {bubbles: true}));
+                }""")
+                await asyncio.sleep(0.3)
+                return True
             except Exception:
-                await radio.click()
-            return True
+                pass
 
     # Strategy 3: Match by value attribute
     for radio in radios:
         radio_val = await radio.get_attribute("value")
         if radio_val and val_lower in radio_val.lower():
-            await radio.scroll_into_view_if_needed()
-            await radio.click()
-            return True
+            try:
+                await radio.evaluate("""e => {
+                    const label = e.labels?.[0] || document.querySelector('label[for="' + e.id + '"]');
+                    if (label) { label.scrollIntoView({block: 'center'}); label.click(); return; }
+                    e.checked = true;
+                    e.dispatchEvent(new Event('change', {bubbles: true}));
+                }""")
+                await asyncio.sleep(0.3)
+                return True
+            except Exception:
+                pass
 
-    # Strategy 4: Click label text directly
+    # Strategy 4: Use Playwright's label locator
     try:
-        label_el = await page.query_selector(f'label:has-text("{value}")')
-        if label_el:
-            await label_el.scroll_into_view_if_needed()
-            await label_el.click()
+        label_el = page.get_by_text(value, exact=True)
+        if await label_el.count() > 0:
+            await label_el.first.scroll_into_view_if_needed()
+            await label_el.first.click()
             return True
     except Exception:
         pass
