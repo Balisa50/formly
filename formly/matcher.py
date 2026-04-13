@@ -15,16 +15,29 @@ You understand context, not just keywords:
 - "Previous Employment" maps to work experience
 - "Contact Information" maps to email/phone/address
 - "Statement of Purpose" is an essay field
+- "First Name" or "Name (First Name)" maps to first_name
+- "Last Name" or "Name (Last Name)" maps to last_name
+- "Subjects" maps to skills or areas of study
+- "Hobbies" maps to hobbies/interests
+- "State and City" or "State" maps to address components
+
+CRITICAL RULES:
+1. The "value" field must ALWAYS be a real human-readable value (a name, email, date, etc.)
+2. NEVER put CSS selectors (#something, .something, input[...]) as a value
+3. NEVER put technical identifiers as values
+4. If you don't know the value, set value=null — do NOT guess with technical garbage
+5. For selection/radio fields, the value MUST be one of the provided options
+6. Phone numbers should be just digits for "10 Digits" fields (no + prefix)
 
 Return ONLY valid JSON — an array of objects:
 [
   {
     "selector": "the CSS selector of the field",
     "field_type": "the field type",
-    "label": "the field label",
+    "label": "the human-readable field label",
     "match_type": "direct|selection|essay|file|unknown",
     "profile_key": "the profile key that matches, or null",
-    "value": "the value to fill, or null if no match",
+    "value": "the REAL value to fill (a name, email, number, etc.), or null",
     "confidence": 0.0 to 1.0,
     "needs_essay": false,
     "note": "brief explanation of the match"
@@ -42,7 +55,8 @@ For selection fields, pick the option that best matches the profile data.
 For essay fields, set needs_essay=true and value=null.
 For unknown fields, set value=null and confidence=0.
 
-Be generous with matching — use the full profile context to find answers."""
+Be generous with matching — use the full profile context to find answers.
+Try hard to match EVERY field. Only mark as "unknown" if you truly cannot infer it."""
 
 
 @dataclass
@@ -101,14 +115,20 @@ Match each form field to the appropriate profile data. Return the JSON array."""
 
     matches = []
     for m in matches_raw:
+        value = m.get("value")
+        # SAFETY: Never allow CSS selectors or technical garbage as values
+        if value and isinstance(value, str):
+            if value.startswith("#") or value.startswith(".") or "input[" in value or "select-" in value or value.startswith("css-"):
+                value = None  # Force to unknown — will be asked or inferred
+
         matches.append(FieldMatch(
             selector=m["selector"],
             field_type=m.get("field_type", "text"),
             label=m.get("label", ""),
-            match_type=m.get("match_type", "unknown"),
+            match_type=m.get("match_type", "unknown") if value is not None or m.get("needs_essay") else "unknown",
             profile_key=m.get("profile_key"),
-            value=m.get("value"),
-            confidence=float(m.get("confidence", 0)),
+            value=value,
+            confidence=float(m.get("confidence", 0)) if value else 0,
             needs_essay=bool(m.get("needs_essay", False)),
             note=m.get("note", ""),
         ))
