@@ -91,43 +91,47 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
             label = match.get("label", selector)
 
             try:
-                # Human-like pause between fields
                 await asyncio.sleep(_human_delay())
 
-                # Try to find the element — if selector fails, try by label
+                # Radios and checkboxes use group selectors — don't use _find_element
+                if ftype == "radio":
+                    ok = await _fill_radio(page, selector, label, value)
+                    if ok:
+                        filled += 1
+                    else:
+                        skipped += 1
+                        errors.append(f"Could not select radio: {label} = {value}")
+                    continue
+
+                if ftype == "checkbox":
+                    await _fill_checkbox(page, selector, label, value)
+                    filled += 1
+                    continue
+
+                # Select/React Select — use dedicated handler
+                if ftype == "select":
+                    ok = await _fill_select(page, selector, label, value)
+                    if ok:
+                        filled += 1
+                    else:
+                        skipped += 1
+                        errors.append(f"Could not select: {label} = {value}")
+                    continue
+
+                # Text, email, textarea, etc. — find element then type
                 el = await _find_element(page, selector, label, ftype)
                 if not el:
                     skipped += 1
                     errors.append(f"Could not find: {label}")
                     continue
 
-                # Get the actual selector that worked for this element
-                actual_selector = selector
-
-                if ftype in ("text", "email", "tel", "number", "url", "password", "textarea"):
-                    await _type_into_element(page, el, value)
-                    filled += 1
-                elif ftype == "date":
+                if ftype == "date":
                     await _fill_date_element(page, el, value)
-                    filled += 1
-                elif ftype == "select":
-                    ok = await _fill_select(page, selector, value)
-                    if ok:
-                        filled += 1
-                    else:
-                        skipped += 1
-                        errors.append(f"Could not select '{value}' for {label}")
-                elif ftype == "radio":
-                    await _fill_radio(page, selector, value)
-                    filled += 1
-                elif ftype == "checkbox":
-                    await _fill_checkbox(page, selector, value)
                     filled += 1
                 else:
                     await _type_into_element(page, el, value)
                     filled += 1
 
-                # Check for dynamic fields
                 await _handle_dynamic_fields(page)
 
             except Exception as e:
@@ -147,8 +151,9 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
         if validation_errors:
             errors.extend(validation_errors)
 
-        # Take final screenshot
-        await asyncio.sleep(0.5)
+        # Scroll to top and take screenshot
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(1)
         screenshot = await page.screenshot(full_page=True)
         screenshot_b64 = base64.b64encode(screenshot).decode()
 
@@ -256,6 +261,41 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
         except Exception:
             pass
 
+    # Strategy 3b: Find textarea/input near a label text on the page
+    if label:
+        try:
+            el_handle = await page.evaluate_handle("""(label) => {
+                const allLabels = [...document.querySelectorAll('label, .label, span, p, td')];
+                const match = allLabels.find(l => {
+                    const text = l.textContent.trim().toLowerCase();
+                    return text.includes(label.toLowerCase()) && text.length < 100;
+                });
+                if (match) {
+                    // Look for input/textarea in the same row/container
+                    const container = match.closest('tr, .form-group, .form-field, [class*="col"], .row, div');
+                    if (container) {
+                        const input = container.querySelector('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]), textarea, select');
+                        if (input) return input;
+                    }
+                    // Try next sibling
+                    const next = match.nextElementSibling;
+                    if (next && ['INPUT', 'TEXTAREA', 'SELECT'].includes(next.tagName)) return next;
+                    // Try parent's next
+                    const parentNext = match.parentElement?.nextElementSibling;
+                    if (parentNext) {
+                        const inp = parentNext.querySelector('input, textarea, select');
+                        if (inp) return inp;
+                    }
+                }
+                return null;
+            }""", label)
+            if el_handle:
+                element = el_handle.as_element()
+                if element:
+                    return element
+        except Exception:
+            pass
+
     # Strategy 4: Find by name attribute
     if label:
         name_guess = label.lower().replace(" ", "").replace("_", "")
@@ -342,27 +382,55 @@ async def _fill_date(page: Page, selector: str, value: str):
 
 # ─── Select / Dropdown ────────────────────────────────
 
-async def _fill_select(page: Page, selector: str, value: str) -> bool:
+async def _fill_select(page: Page, selector: str, label: str, value: str) -> bool:
     """Fill select dropdowns including React Select and custom dropdowns."""
     # Check if React Select
     if "react-select" in selector or "css-" in selector:
         return await _fill_react_select(page, selector, value)
 
-    el = await page.wait_for_selector(selector, timeout=5000, state="visible")
+    # Try to find the element
+    el = None
+    if selector:
+        try:
+            el = await page.wait_for_selector(selector, timeout=3000, state="visible")
+        except Exception:
+            pass
+
+    # Fallback: find by label
+    if not el and label:
+        el = await _find_element(page, "", label, "select")
+
+    # Check if this is actually a React Select (class-based detection)
+    if not el and label:
+        # Look for React Select containers near this label
+        react_input = await page.evaluate("""(label) => {
+            const labels = [...document.querySelectorAll('label')];
+            const match = labels.find(l => l.textContent.trim().toLowerCase().includes(label.toLowerCase()));
+            if (match) {
+                const container = match.closest('.form-group, .form-field, [class*="col"], .mb-3') || match.parentElement;
+                if (container) {
+                    const input = container.querySelector('input[id*="react-select"], input[role="combobox"]');
+                    if (input) return input.id || null;
+                }
+            }
+            return null;
+        }""", label)
+        if react_input:
+            return await _fill_react_select(page, f"#{react_input}", value)
+
     if not el:
-        return False
+        # Last resort: try React Select approach with any visible combobox
+        return await _fill_react_select_by_label(page, label, value)
 
     await el.scroll_into_view_if_needed()
     tag = await el.evaluate("e => e.tagName.toLowerCase()")
 
     if tag == "select":
-        # Native HTML select
         try:
             await el.select_option(label=value)
             return True
         except Exception:
             pass
-        # Try partial match on option text
         try:
             matched = await page.evaluate("""(args) => {
                 const [sel, val] = args;
@@ -377,8 +445,29 @@ async def _fill_select(page: Page, selector: str, value: str) -> bool:
         except Exception:
             return False
     else:
-        # Custom dropdown — try React Select approach
         return await _fill_react_select(page, selector, value)
+
+
+async def _fill_react_select_by_label(page: Page, label: str, value: str) -> bool:
+    """Find a React Select near a label and fill it."""
+    try:
+        # Find all React Select input fields
+        inputs = await page.query_selector_all('input[id*="react-select"], input[role="combobox"]')
+        for inp in inputs:
+            # Check if this input is near our label
+            is_near = await inp.evaluate("""(e, label) => {
+                const container = e.closest('.form-group, .form-field, [class*="col"], .mb-3, .mb-4, div') || e.parentElement?.parentElement;
+                if (!container) return false;
+                const text = container.textContent.toLowerCase();
+                return text.includes(label.toLowerCase());
+            }""", label)
+            if is_near:
+                inp_id = await inp.get_attribute("id")
+                sel = f"#{inp_id}" if inp_id else 'input[role="combobox"]'
+                return await _fill_react_select(page, sel, value)
+        return False
+    except Exception:
+        return False
 
 
 async def _fill_react_select(page: Page, selector: str, value: str) -> bool:
@@ -419,10 +508,16 @@ async def _fill_react_select(page: Page, selector: str, value: str) -> bool:
 
 # ─── Radio buttons ─────────────────────────────────────
 
-async def _fill_radio(page: Page, selector: str, value: str):
-    """Select the radio button matching the value."""
-    radios = await page.query_selector_all(selector)
+async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool:
+    """Select the radio button matching the value. Uses multiple strategies."""
     val_lower = value.lower().strip()
+
+    # Strategy 1: Use the CSS selector
+    radios = await page.query_selector_all(selector) if selector else []
+
+    # Strategy 2: If no radios found, search by type=radio broadly
+    if not radios:
+        radios = await page.query_selector_all('input[type="radio"]')
 
     for radio in radios:
         label_text = await radio.evaluate("""e => {
@@ -434,29 +529,42 @@ async def _fill_radio(page: Page, selector: str, value: str):
         if label_text and (val_lower in label_text.lower() or label_text.lower() in val_lower):
             await radio.scroll_into_view_if_needed()
             await asyncio.sleep(random.uniform(0.2, 0.5))
-            # Click the label or the radio itself
             try:
                 label_el = await radio.evaluate_handle("""e => e.labels?.[0] || e.parentElement""")
                 await label_el.as_element().click()
             except Exception:
                 await radio.click()
-            return
+            return True
 
-    # Fallback: try matching by value attribute
+    # Strategy 3: Match by value attribute
     for radio in radios:
         radio_val = await radio.get_attribute("value")
         if radio_val and val_lower in radio_val.lower():
             await radio.scroll_into_view_if_needed()
             await radio.click()
-            return
+            return True
+
+    # Strategy 4: Click label text directly
+    try:
+        label_el = await page.query_selector(f'label:has-text("{value}")')
+        if label_el:
+            await label_el.scroll_into_view_if_needed()
+            await label_el.click()
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 # ─── Checkboxes ────────────────────────────────────────
 
-async def _fill_checkbox(page: Page, selector: str, value: str):
+async def _fill_checkbox(page: Page, selector: str, label: str, value: str):
     """Check boxes matching comma-separated values."""
     values = [v.strip().lower() for v in value.split(",")]
-    checkboxes = await page.query_selector_all(selector)
+    checkboxes = await page.query_selector_all(selector) if selector else []
+    if not checkboxes:
+        checkboxes = await page.query_selector_all('input[type="checkbox"]')
 
     for cb in checkboxes:
         label_text = await cb.evaluate("""e => {
