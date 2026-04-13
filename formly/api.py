@@ -20,9 +20,12 @@ from .essay_writer import write_essay
 
 app = FastAPI(title="Formly", description="Autonomous form filling agent", version="0.1.0")
 
+import os
+
+dashboard_url = os.getenv("DASHBOARD_URL", "http://localhost:3000")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=[dashboard_url, "http://localhost:3000", "https://formly-dashboard.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -102,10 +105,13 @@ async def upload_cv(file: UploadFile = File(...)):
         data = parse_cv(cv_path)
         return {
             "ok": True,
+            "message": "CV parsed successfully! Your details have been filled in.",
             "extracted": {
+                "personal": {k: v for k, v in data.items() if isinstance(v, str) and v},
                 "work": len(data.get("work_experience", [])),
                 "education": len(data.get("education", [])),
                 "skills": len(data.get("skills", [])),
+                "languages": len(data.get("languages", [])),
             },
         }
     except Exception as e:

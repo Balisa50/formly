@@ -7,5 +7,7 @@ services:
     envVars:
       - key: GROQ_API_KEY
         sync: false
+      - key: DASHBOARD_URL
+        value: https://formly-dashboard.vercel.app
     plan: free
     branch: main

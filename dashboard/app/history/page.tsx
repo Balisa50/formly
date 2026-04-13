@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { api } from "../lib/api";
 
 export default function HistoryPage() {
@@ -24,30 +25,40 @@ export default function HistoryPage() {
       <h1 className="text-2xl font-bold mb-1">Application History</h1>
       <p className="text-sm text-text-muted mb-6">Every form you&apos;ve ever filled.</p>
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
-        <div className="bg-surface rounded-xl border border-border p-4">
-          <p className="text-xs text-text-muted">Total</p>
-          <p className="text-xl font-bold">{apps.length}</p>
-        </div>
-        <div className="bg-surface rounded-xl border border-border p-4">
-          <p className="text-xs text-text-muted">Submitted</p>
-          <p className="text-xl font-bold text-green">{submitted}</p>
-        </div>
-        <div className="bg-surface rounded-xl border border-border p-4">
-          <p className="text-xs text-text-muted">Completion Rate</p>
-          <p className="text-xl font-bold">
-            {apps.length > 0 ? `${Math.round((submitted / apps.length) * 100)}%` : "—"}
-          </p>
-        </div>
-      </div>
-
-      {/* List */}
       {apps.length === 0 ? (
-        <div className="bg-surface rounded-xl border border-border p-8 text-center">
-          <p className="text-text-muted">No applications yet. Go to Fill Form to get started!</p>
+        <div className="bg-surface rounded-xl border border-border p-10 text-center">
+          <div className="w-14 h-14 rounded-full bg-accent/10 flex items-center justify-center mx-auto mb-4">
+            <svg className="w-7 h-7 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <p className="font-medium mb-2">No applications yet</p>
+          <p className="text-sm text-text-muted mb-5 max-w-sm mx-auto">
+            Every form you fill will be tracked here — the URL, what was filled, and when. Start by filling your first form.
+          </p>
+          <Link href="/fill" className="inline-flex bg-accent hover:bg-accent-hover text-white text-sm px-5 py-2.5 rounded-lg transition-colors">
+            Fill a Form
+          </Link>
         </div>
       ) : (
+        <>
+        {/* Stats — only show when there's data */}
+        <div className="grid grid-cols-3 gap-4 mb-6">
+          <div className="bg-surface rounded-xl border border-border p-4">
+            <p className="text-xs text-text-muted">Total</p>
+            <p className="text-xl font-bold">{apps.length}</p>
+          </div>
+          <div className="bg-surface rounded-xl border border-border p-4">
+            <p className="text-xs text-text-muted">Submitted</p>
+            <p className="text-xl font-bold text-green">{submitted}</p>
+          </div>
+          <div className="bg-surface rounded-xl border border-border p-4">
+            <p className="text-xs text-text-muted">Completion Rate</p>
+            <p className="text-xl font-bold">
+              {apps.length > 0 ? `${Math.round((submitted / apps.length) * 100)}%` : "—"}
+            </p>
+          </div>
+        </div>
         <div className="space-y-2">
           {apps.map((app) => {
             const statusEmoji: Record<string, string> = {
@@ -94,6 +105,7 @@ export default function HistoryPage() {
             );
           })}
         </div>
+        </>
       )}
     </>
   );
