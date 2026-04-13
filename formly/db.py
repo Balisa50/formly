@@ -12,12 +12,23 @@ from .config import DB_PATH
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
+# URL-encode special chars in password if needed
+if DATABASE_URL and "!" in DATABASE_URL:
+    from urllib.parse import urlparse, quote, urlunparse
+    parsed = urlparse(DATABASE_URL)
+    if parsed.password:
+        encoded_pw = quote(parsed.password, safe="")
+        netloc = f"{parsed.username}:{encoded_pw}@{parsed.hostname}"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        DATABASE_URL = urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
 # ─── Detect database mode ──────────────────────────────
 USE_POSTGRES = bool(DATABASE_URL)
 
 if USE_POSTGRES:
-    import psycopg2
-    import psycopg2.extras
+    import psycopg
+    from psycopg.rows import dict_row
 
 PG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS profile (
@@ -142,7 +153,7 @@ def _now() -> str:
 def get_conn():
     """Yields a DB connection (PostgreSQL or SQLite) with auto-commit."""
     if USE_POSTGRES:
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=False)
         try:
             yield conn
             conn.commit()
@@ -196,8 +207,7 @@ def _pg_upsert(sql: str) -> str:
 def _fetchall(conn, sql: str, params: tuple = ()) -> list[dict]:
     if USE_POSTGRES:
         sql = sql.replace("?", "%s")
-        cur = conn.cursor()
-        cur.execute(sql, params)
+        cur = conn.execute(sql, params)
         return [dict(row) for row in cur.fetchall()]
     else:
         rows = conn.execute(sql, params).fetchall()
@@ -207,9 +217,7 @@ def _fetchall(conn, sql: str, params: tuple = ()) -> list[dict]:
 def _fetchone(conn, sql: str, params: tuple = ()) -> dict | None:
     if USE_POSTGRES:
         sql = sql.replace("?", "%s")
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        row = cur.fetchone()
+        row = conn.execute(sql, params).fetchone()
         return dict(row) if row else None
     else:
         row = conn.execute(sql, params).fetchone()
@@ -218,14 +226,12 @@ def _fetchone(conn, sql: str, params: tuple = ()) -> dict | None:
 
 def init_db() -> None:
     if USE_POSTGRES:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg.connect(DATABASE_URL, autocommit=True)
         try:
-            cur = conn.cursor()
             for statement in PG_SCHEMA.strip().split(";"):
                 statement = statement.strip()
                 if statement:
-                    cur.execute(statement + ";")
-            conn.commit()
+                    conn.execute(statement + ";")
         finally:
             conn.close()
     else:
@@ -275,10 +281,11 @@ def delete_profile(key: str) -> None:
 def add_work(company: str, title: str, start_date: str = "", end_date: str = "", description: str = "") -> int:
     with get_conn() as conn:
         if USE_POSTGRES:
-            sql = "INSERT INTO work_experience (company, title, start_date, end_date, description, created_at) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id"
-            cur = conn.cursor()
-            cur.execute(sql, (company, title, start_date, end_date, description, _now()))
-            return cur.fetchone()["id"]
+            row = conn.execute(
+                "INSERT INTO work_experience (company, title, start_date, end_date, description, created_at) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+                (company, title, start_date, end_date, description, _now()),
+            ).fetchone()
+            return row["id"]
         else:
             cur = conn.execute(
                 "INSERT INTO work_experience (company, title, start_date, end_date, description, created_at) VALUES (?,?,?,?,?,?)",
@@ -302,10 +309,11 @@ def delete_work(id: int) -> None:
 def add_education(institution: str, degree: str, field: str = "", start_date: str = "", end_date: str = "", gpa: str = "") -> int:
     with get_conn() as conn:
         if USE_POSTGRES:
-            sql = "INSERT INTO education (institution, degree, field, start_date, end_date, gpa, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id"
-            cur = conn.cursor()
-            cur.execute(sql, (institution, degree, field, start_date, end_date, gpa, _now()))
-            return cur.fetchone()["id"]
+            row = conn.execute(
+                "INSERT INTO education (institution, degree, field, start_date, end_date, gpa, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (institution, degree, field, start_date, end_date, gpa, _now()),
+            ).fetchone()
+            return row["id"]
         else:
             cur = conn.execute(
                 "INSERT INTO education (institution, degree, field, start_date, end_date, gpa, created_at) VALUES (?,?,?,?,?,?,?)",
@@ -349,10 +357,11 @@ def delete_skill(id: int) -> None:
 def save_essay(prompt: str, response: str, context: str = "", approved: bool = False) -> int:
     with get_conn() as conn:
         if USE_POSTGRES:
-            sql = "INSERT INTO essays (prompt, context, response, approved, created_at) VALUES (%s,%s,%s,%s,%s) RETURNING id"
-            cur = conn.cursor()
-            cur.execute(sql, (prompt, context, response, int(approved), _now()))
-            return cur.fetchone()["id"]
+            row = conn.execute(
+                "INSERT INTO essays (prompt, context, response, approved, created_at) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+                (prompt, context, response, int(approved), _now()),
+            ).fetchone()
+            return row["id"]
         else:
             cur = conn.execute(
                 "INSERT INTO essays (prompt, context, response, approved, created_at) VALUES (?,?,?,?,?)",
@@ -371,10 +380,11 @@ def get_past_essays(limit: int = 10) -> list[dict]:
 def log_application(url: str, title: str = "", fields: dict | None = None) -> int:
     with get_conn() as conn:
         if USE_POSTGRES:
-            sql = "INSERT INTO applications (url, title, fields_json, created_at) VALUES (%s,%s,%s,%s) RETURNING id"
-            cur = conn.cursor()
-            cur.execute(sql, (url, title, json.dumps(fields or {}), _now()))
-            return cur.fetchone()["id"]
+            row = conn.execute(
+                "INSERT INTO applications (url, title, fields_json, created_at) VALUES (%s,%s,%s,%s) RETURNING id",
+                (url, title, json.dumps(fields or {}), _now()),
+            ).fetchone()
+            return row["id"]
         else:
             cur = conn.execute(
                 "INSERT INTO applications (url, title, fields_json, created_at) VALUES (?,?,?,?)",

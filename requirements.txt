@@ -6,4 +6,4 @@ PyPDF2>=3.0
 requests>=2.31
 python-dotenv>=1.0
 aiofiles>=24.1
-psycopg2-binary>=2.9
+psycopg[binary]>=3.1
