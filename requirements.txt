@@ -1,7 +1,7 @@
 fastapi>=0.115
 uvicorn[standard]>=0.34
 python-multipart>=0.0.9
-playwright>=1.49
+playwright==1.52.0
 PyPDF2>=3.0
 requests>=2.31
 python-dotenv>=1.0
