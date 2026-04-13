@@ -44,7 +44,92 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "formly", "version": "2.1.0"}
+    return {"status": "ok", "service": "formly", "version": "2.2.0"}
+
+
+@app.get("/api/debug/demoqa")
+def debug_demoqa():
+    """Debug: open demoqa and test finding the 3 failing elements."""
+    if not PLAYWRIGHT_AVAILABLE:
+        return {"error": "Playwright not available"}
+    import asyncio
+    from playwright.async_api import async_playwright
+
+    async def _test():
+        results = {}
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            page = await browser.new_page()
+            await page.goto("https://demoqa.com/automation-practice-form", wait_until="networkidle", timeout=30000)
+
+            # Test 1: Can we find #currentAddress?
+            try:
+                el = await page.wait_for_selector("#currentAddress", timeout=5000, state="attached")
+                if el:
+                    tag = await el.evaluate("e => e.tagName")
+                    vis = await el.is_visible()
+                    results["currentAddress"] = {"found": True, "tag": tag, "visible": vis}
+                else:
+                    results["currentAddress"] = {"found": False, "reason": "wait_for_selector returned None"}
+            except Exception as e:
+                results["currentAddress"] = {"found": False, "reason": str(e)[:200]}
+
+            # Test 2: Can we find #subjectsInput?
+            try:
+                el = await page.wait_for_selector("#subjectsInput", timeout=5000, state="attached")
+                if el:
+                    tag = await el.evaluate("e => e.tagName")
+                    vis = await el.is_visible()
+                    parent_class = await el.evaluate("e => e.parentElement?.className || ''")
+                    results["subjectsInput"] = {"found": True, "tag": tag, "visible": vis, "parent_class": parent_class[:100]}
+                else:
+                    results["subjectsInput"] = {"found": False, "reason": "wait_for_selector returned None"}
+            except Exception as e:
+                results["subjectsInput"] = {"found": False, "reason": str(e)[:200]}
+
+            # Test 3: Can we find radio buttons?
+            try:
+                radios = await page.query_selector_all('input[name="gender"]')
+                radio_info = []
+                for r in radios:
+                    info = await r.evaluate("""e => ({
+                        id: e.id, value: e.value, checked: e.checked,
+                        visible: e.offsetParent !== null,
+                        label: e.labels?.[0]?.textContent?.trim() || 'no label',
+                        labelFor: e.labels?.[0]?.htmlFor || 'none'
+                    })""")
+                    radio_info.append(info)
+                results["genderRadios"] = {"found": len(radios), "details": radio_info}
+            except Exception as e:
+                results["genderRadios"] = {"found": 0, "reason": str(e)[:200]}
+
+            # Test 4: Try get_by_label for Male
+            try:
+                loc = page.get_by_label("Male", exact=True)
+                count = await loc.count()
+                results["getByLabelMale"] = {"count": count}
+                if count > 0:
+                    await loc.first.check(force=True)
+                    results["getByLabelMale"]["checked"] = True
+            except Exception as e:
+                results["getByLabelMale"] = {"error": str(e)[:200]}
+
+            # Test 5: What fields does form_reader find?
+            try:
+                all_ids = await page.evaluate("""() => {
+                    return [...document.querySelectorAll('input, textarea, select')].map(e => ({
+                        id: e.id, name: e.name, type: e.type, tag: e.tagName,
+                        visible: e.offsetParent !== null
+                    })).filter(e => e.id || e.name)
+                }""")
+                results["allFields"] = all_ids
+            except Exception as e:
+                results["allFields"] = {"error": str(e)[:200]}
+
+            await browser.close()
+        return results
+
+    return asyncio.run(_test())
 
 
 # ─── Profile ────────────────────────────────────────────
