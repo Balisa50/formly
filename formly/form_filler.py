@@ -139,13 +139,14 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
 
                     // Walk up to find React Select wrapper (check multiple class patterns)
                     let node = e;
-                    for (let i = 0; i < 6; i++) {
+                    for (let i = 0; i < 8; i++) {
                         node = node.parentElement;
                         if (!node) break;
-                        const cls = node.className || '';
-                        if (typeof cls !== 'string') continue;
-                        // React Select uses classes like: *__control, *__value-container, *-container, css-*-control
+                        const cls = (typeof node.className === 'string') ? node.className : '';
+                        // React Select class patterns (camelCase AND kebab-case)
                         if (cls.includes('__control') || cls.includes('__value-container') ||
+                            cls.includes('__input-container') || cls.includes('__input') ||
+                            cls.includes('auto-complete') || cls.includes('autocomplete') ||
                             cls.includes('-indicatorContainer') || cls.includes('-ValueContainer') ||
                             cls.includes('indicator-container') || cls.includes('value-container') ||
                             (cls.includes('react-select') && cls.includes('container'))) {
@@ -275,8 +276,15 @@ async def _check_captcha(page: Page) -> bool:
 async def _find_element(page: Page, selector: str, label: str, ftype: str):
     """Find an element using multiple strategies. Returns ElementHandle or None."""
 
-    # Strategy 1: Direct CSS selector — try attached (exists in DOM), not just visible
+    # Strategy 1: Direct CSS selector — use query_selector (instant, no timeout issues)
     if selector:
+        try:
+            el = await page.query_selector(selector)
+            if el:
+                return el
+        except Exception:
+            pass
+        # Fallback: wait briefly for dynamic elements
         try:
             el = await page.wait_for_selector(selector, timeout=3000, state="attached")
             if el:
@@ -410,6 +418,10 @@ async def _type_into_element(page: Page, el, value: str):
     # Type character by character
     for char in value:
         await page.keyboard.type(char, delay=_typing_delay())
+
+    # Close any dropdowns/datepickers that may have opened
+    await page.keyboard.press("Escape")
+    await asyncio.sleep(0.2)
 
     # Tab out to trigger validation
     await page.keyboard.press("Tab")
@@ -621,12 +633,29 @@ async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool
     Handles hidden radios (opacity:0) with custom label styling (like demoqa)."""
     val_lower = value.lower().strip()
 
+    # First: close any open datepickers/popups that might be blocking
+    try:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
+    except Exception:
+        pass
+
     # Strategy 1: Use Playwright's get_by_label — most reliable for radio buttons
     try:
         loc = page.get_by_label(value, exact=True)
-        if await loc.count() > 0:
-            await loc.first.check(force=True)
-            return True
+        count = await loc.count()
+        if count > 0:
+            try:
+                await loc.first.check(force=True)
+                return True
+            except Exception:
+                # If check fails, try clicking the label directly
+                try:
+                    await loc.first.click(force=True)
+                    await asyncio.sleep(0.3)
+                    return True
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -634,7 +663,7 @@ async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool
     try:
         loc = page.get_by_text(value, exact=True)
         if await loc.count() > 0:
-            await loc.first.click()
+            await loc.first.click(force=True)
             await asyncio.sleep(0.3)
             return True
     except Exception:
