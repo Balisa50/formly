@@ -30,6 +30,8 @@ export default function ProfilePage() {
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string>("");
   const [completeness, setCompleteness] = useState(0);
+  const [photoUrl, setPhotoUrl] = useState<string>("");
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
   const [personal, setPersonal] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -57,11 +59,31 @@ export default function ProfilePage() {
       setProfile(p);
       setCompleteness(c.completeness);
       setPersonal(p.personal || {});
+      if (p.personal?.photo_url) setPhotoUrl(p.personal.photo_url);
     } catch {}
     setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  async function handlePhoto(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingPhoto(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${BASE}/api/profile/photo`, { method: "POST", body: form });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setPhotoUrl(data.url || "uploaded");
+      await load();
+    } catch (err) {
+      console.error("Photo upload failed:", err);
+    }
+    setUploadingPhoto(false);
+  }
 
   async function handleCV(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -188,6 +210,40 @@ export default function ProfilePage() {
             {uploadStatus}
           </div>
         )}
+      </div>
+
+      {/* Profile Photo */}
+      <div className="bg-surface rounded-xl border border-border p-5 mb-6">
+        <h2 className="font-semibold mb-2">Profile Photo</h2>
+        <p className="text-sm text-text-muted mb-3">
+          Upload a passport-style photo. Many applications and forms require one.
+        </p>
+        <div className="flex items-center gap-4">
+          <div className="w-20 h-20 rounded-full bg-surface-elevated border-2 border-border flex items-center justify-center overflow-hidden shrink-0">
+            {photoUrl ? (
+              <div className="w-full h-full bg-green/10 flex items-center justify-center">
+                <svg className="w-8 h-8 text-green" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+            ) : (
+              <svg className="w-8 h-8 text-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+              </svg>
+            )}
+          </div>
+          <div>
+            <label className="inline-flex items-center gap-2 bg-surface-elevated hover:bg-border text-text-secondary text-sm px-4 py-2 rounded-lg cursor-pointer transition-colors border border-border">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
+              </svg>
+              {uploadingPhoto ? "Uploading..." : photoUrl ? "Change Photo" : "Upload Photo"}
+              <input type="file" accept="image/*" onChange={handlePhoto} className="hidden" disabled={uploadingPhoto} />
+            </label>
+            {photoUrl && <p className="text-xs text-green mt-2">Photo uploaded and saved</p>}
+          </div>
+        </div>
       </div>
 
       {/* Personal Details */}
