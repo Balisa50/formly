@@ -76,19 +76,6 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
         await _dismiss_popups(page)
         await asyncio.sleep(_human_delay())
 
-        # Check for CAPTCHA
-        captcha = await _check_captcha(page)
-        if captcha:
-            # Take screenshot of CAPTCHA for user
-            ss = await page.screenshot(full_page=True)
-            await browser.close()
-            return FillResult(
-                filled=0, skipped=len(matches), pages_navigated=1,
-                screenshot_b64=base64.b64encode(ss).decode(),
-                errors=["CAPTCHA detected — please solve it manually and try again"],
-                captcha_detected=True,
-            )
-
         # Sort: text first, then selects, then radios/checkboxes
         priority = {"text": 0, "email": 0, "tel": 0, "number": 0, "textarea": 1,
                      "date": 2, "select": 3, "radio": 4, "checkbox": 4}
@@ -107,14 +94,21 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
                 # Human-like pause between fields
                 await asyncio.sleep(_human_delay())
 
-                if ftype in ("text", "email", "tel", "number", "url", "password"):
-                    await _type_text(page, selector, value)
-                    filled += 1
-                elif ftype == "textarea":
-                    await _type_text(page, selector, value)
+                # Try to find the element — if selector fails, try by label
+                el = await _find_element(page, selector, label, ftype)
+                if not el:
+                    skipped += 1
+                    errors.append(f"Could not find: {label}")
+                    continue
+
+                # Get the actual selector that worked for this element
+                actual_selector = selector
+
+                if ftype in ("text", "email", "tel", "number", "url", "password", "textarea"):
+                    await _type_into_element(page, el, value)
                     filled += 1
                 elif ftype == "date":
-                    await _fill_date(page, selector, value)
+                    await _fill_date_element(page, el, value)
                     filled += 1
                 elif ftype == "select":
                     ok = await _fill_select(page, selector, value)
@@ -130,10 +124,10 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
                     await _fill_checkbox(page, selector, value)
                     filled += 1
                 else:
-                    await _type_text(page, selector, value)
+                    await _type_into_element(page, el, value)
                     filled += 1
 
-                # Check for dynamic fields that appeared after filling
+                # Check for dynamic fields
                 await _handle_dynamic_fields(page)
 
             except Exception as e:
@@ -142,6 +136,11 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
 
         # Handle multi-page forms
         pages = await _navigate_pages(page, sorted_matches)
+
+        # Check for CAPTCHA (after filling, before submit)
+        captcha = await _check_captcha(page)
+        if captcha:
+            errors.append("CAPTCHA detected on the form — you'll need to solve it manually when you open the form")
 
         # Validate — check for required field errors
         validation_errors = await _check_validation(page)
@@ -194,26 +193,96 @@ async def _dismiss_popups(page: Page):
 # ─── CAPTCHA detection ─────────────────────────────────
 
 async def _check_captcha(page: Page) -> bool:
-    """Detect if the page has a CAPTCHA."""
+    """Detect REAL form CAPTCHAs — not just ads or scripts with 'recaptcha' in them."""
     return await page.evaluate("""() => {
-        const html = document.documentElement.innerHTML.toLowerCase();
-        if (html.includes('recaptcha') || html.includes('hcaptcha') || html.includes('captcha'))
-            return true;
-        if (document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], .g-recaptcha, .h-captcha'))
+        // Only detect visible CAPTCHA challenges, not hidden ad scripts
+        const captchaFrame = document.querySelector(
+            'iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/api2/bframe"], ' +
+            'iframe[src*="hcaptcha.com/captcha"], .g-recaptcha[data-sitekey], .h-captcha[data-sitekey]'
+        );
+        if (captchaFrame) {
+            // Check if it's actually visible (not hidden in ads)
+            const rect = captchaFrame.getBoundingClientRect();
+            if (rect.width > 50 && rect.height > 50) return true;
+        }
+        // Check for Cloudflare challenge page
+        if (document.title.includes('Just a moment') || document.querySelector('#challenge-running'))
             return true;
         return false;
     }""")
 
 
-# ─── Text typing (human-like) ─────────────────────────
+# ─── Smart element finding ─────────────────────────────
 
-async def _type_text(page: Page, selector: str, value: str):
-    """Click a field and type with human-like speed."""
-    el = await page.wait_for_selector(selector, timeout=5000, state="visible")
-    if not el:
-        raise Exception(f"Not found: {selector}")
+async def _find_element(page: Page, selector: str, label: str, ftype: str):
+    """Find an element using multiple strategies — CSS selector, label text, name, placeholder."""
+    # Strategy 1: Direct CSS selector
+    if selector:
+        try:
+            el = await page.wait_for_selector(selector, timeout=3000, state="visible")
+            if el:
+                return el
+        except Exception:
+            pass
 
-    # Scroll into view
+    # Strategy 2: Find by label text using for attribute
+    if label:
+        try:
+            el = await page.evaluate_handle("""(label) => {
+                // Find label element containing this text
+                const labels = [...document.querySelectorAll('label')];
+                const match = labels.find(l => l.textContent.trim().toLowerCase().includes(label.toLowerCase()));
+                if (match && match.htmlFor) {
+                    return document.getElementById(match.htmlFor);
+                }
+                if (match) {
+                    // Check for input inside the label
+                    return match.querySelector('input, textarea, select');
+                }
+                return null;
+            }""", label)
+            el_value = await el.json_value() if el else None
+            if el_value is not None:
+                return el.as_element()
+        except Exception:
+            pass
+
+    # Strategy 3: Find by placeholder text
+    if label:
+        try:
+            el = await page.query_selector(f'input[placeholder*="{label}" i], textarea[placeholder*="{label}" i]')
+            if el:
+                return el
+        except Exception:
+            pass
+
+    # Strategy 4: Find by name attribute
+    if label:
+        name_guess = label.lower().replace(" ", "").replace("_", "")
+        try:
+            for tag in ["input", "textarea", "select"]:
+                el = await page.query_selector(f'{tag}[name*="{name_guess}" i]')
+                if el:
+                    return el
+        except Exception:
+            pass
+
+    # Strategy 5: Find by aria-label
+    if label:
+        try:
+            el = await page.query_selector(f'[aria-label*="{label}" i]')
+            if el:
+                return el
+        except Exception:
+            pass
+
+    return None
+
+
+# ─── Text typing (human-like, works with element directly) ──
+
+async def _type_into_element(page: Page, el, value: str):
+    """Type into an already-found element with human-like speed."""
     await el.scroll_into_view_if_needed()
     await asyncio.sleep(random.uniform(0.1, 0.3))
 
@@ -226,7 +295,7 @@ async def _type_text(page: Page, selector: str, value: str):
     await page.keyboard.press("Backspace")
     await asyncio.sleep(random.uniform(0.1, 0.2))
 
-    # Type character by character with random delays
+    # Type character by character
     for char in value:
         await page.keyboard.type(char, delay=_typing_delay())
 
@@ -234,32 +303,41 @@ async def _type_text(page: Page, selector: str, value: str):
     await page.keyboard.press("Tab")
 
 
-# ─── Date fields ──────────────────────────────────────
-
-async def _fill_date(page: Page, selector: str, value: str):
-    """Fill date inputs — handles text-based and native date pickers."""
-    el = await page.wait_for_selector(selector, timeout=5000, state="visible")
+async def _type_text(page: Page, selector: str, value: str):
+    """Legacy: find element by selector and type."""
+    el = await _find_element(page, selector, "", "text")
     if not el:
         raise Exception(f"Not found: {selector}")
+    await _type_into_element(page, el, value)
 
+
+# ─── Date fields ──────────────────────────────────────
+
+async def _fill_date_element(page: Page, el, value: str):
+    """Fill date input using element directly."""
     await el.scroll_into_view_if_needed()
     input_type = await el.get_attribute("type")
 
     if input_type == "date":
-        # Native date input needs YYYY-MM-DD format
-        # Try to parse common formats
         await el.fill(value)
     else:
-        # Text-based date — click, clear, type
         await el.click()
         await asyncio.sleep(0.2)
         await page.keyboard.press("Control+a")
         await page.keyboard.press("Backspace")
         for char in value:
             await page.keyboard.type(char, delay=_typing_delay())
-        await page.keyboard.press("Escape")  # Close any date picker popup
+        await page.keyboard.press("Escape")
         await asyncio.sleep(0.2)
         await page.keyboard.press("Tab")
+
+
+async def _fill_date(page: Page, selector: str, value: str):
+    """Legacy wrapper."""
+    el = await _find_element(page, selector, "", "date")
+    if not el:
+        raise Exception(f"Not found: {selector}")
+    await _fill_date_element(page, el, value)
 
 
 # ─── Select / Dropdown ────────────────────────────────
