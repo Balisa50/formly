@@ -5,7 +5,7 @@ import { api } from "../lib/api";
 
 type Phase = "idle" | "working" | "asking" | "filling" | "done";
 type LogEntry = {
-  type: "progress" | "filled" | "asking" | "essay" | "filling" | "error" | "screenshot" | "user" | "done";
+  type: "progress" | "filled" | "asking" | "essay" | "filling" | "error" | "screenshot" | "user" | "done" | "ready";
   message: string;
   data?: any;
 };
