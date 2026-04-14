@@ -170,6 +170,10 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
                 if ftype == "date":
                     await _fill_date_element(page, el, value)
                     filled += 1
+                elif ftype == "text" and await _is_datepicker_field(page, el, label):
+                    # React datepicker detected — use JS to set value
+                    await _fill_datepicker_via_js(page, el, value)
+                    filled += 1
                 else:
                     await _type_into_element(page, el, value)
                     filled += 1
@@ -435,6 +439,121 @@ async def _type_text(page: Page, selector: str, value: str):
     await _type_into_element(page, el, value)
 
 
+# ─── Date picker detection & JS fill ─────────────────
+
+async def _is_datepicker_field(page: Page, el, label: str) -> bool:
+    """Detect if an element is a React datepicker or similar date widget."""
+    label_lower = (label or "").lower()
+    # Check label for date-related keywords
+    if any(kw in label_lower for kw in ("date", "birth", "dob", "birthday")):
+        return True
+    # Check element and its ancestors for datepicker classes
+    return await el.evaluate("""e => {
+        // Check the element itself
+        const cls = (typeof e.className === 'string') ? e.className : '';
+        if (cls.includes('datepicker') || cls.includes('date-picker') ||
+            cls.includes('react-datepicker')) return true;
+        if (e.getAttribute('data-date') !== null) return true;
+        // Walk up parents
+        let node = e;
+        for (let i = 0; i < 6; i++) {
+            node = node.parentElement;
+            if (!node) break;
+            const pcls = (typeof node.className === 'string') ? node.className : '';
+            if (pcls.includes('datepicker') || pcls.includes('date-picker') ||
+                pcls.includes('react-datepicker')) return true;
+        }
+        return false;
+    }""")
+
+
+def _parse_date_value(value: str) -> tuple[int, int, int] | None:
+    """Parse a date string into (day, month, year). Returns None on failure.
+
+    Supported formats:
+      DD/MM/YYYY, DD-MM-YYYY  (day first — assumed when day <= 12 ambiguity
+                                is resolved by first-token > 12)
+      MM/DD/YYYY              (if first token <= 12 and second > 12)
+      YYYY-MM-DD, YYYY/MM/DD  (ISO)
+    """
+    import re
+    value = value.strip()
+    parts = re.split(r'[/\-.]', value)
+    if len(parts) != 3:
+        return None
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+
+    a, b, c = nums
+    # ISO: YYYY-MM-DD
+    if a > 100:
+        return (c, b, a)  # day, month, year
+    # If third part is a 4-digit year
+    if c > 100:
+        # DD/MM/YYYY vs MM/DD/YYYY
+        if a > 12:
+            # a must be day
+            return (a, b, c)
+        elif b > 12:
+            # b must be day, so a is month
+            return (b, a, c)
+        else:
+            # Ambiguous — assume DD/MM/YYYY (European / most-of-world default)
+            return (a, b, c)
+    return None
+
+
+async def _fill_datepicker_via_js(page: Page, el, value: str):
+    """Set a React datepicker value using JavaScript to avoid keystroke issues."""
+    parsed = _parse_date_value(value)
+    if not parsed:
+        # Fallback: just type it
+        await _type_into_element(page, el, value)
+        return
+
+    day, month, year = parsed
+    # Format as MM/DD/YYYY which is what JS Date and react-datepicker expect
+    formatted = f"{month:02d}/{day:02d}/{year:04d}"
+
+    await el.scroll_into_view_if_needed()
+    await asyncio.sleep(random.uniform(0.1, 0.3))
+
+    await page.evaluate("""([formatted]) => {
+        // Find the react-datepicker input (it may be the active element or
+        // the element we received)
+        const el = document.activeElement &&
+                   document.activeElement.tagName === 'INPUT'
+                   ? document.activeElement : null;
+        const inputs = el ? [el] : [
+            ...document.querySelectorAll(
+                '.react-datepicker__input-container input, ' +
+                'input.react-datepicker-ignore-onclickoutside, ' +
+                'input[class*="datepicker"]'
+            )
+        ];
+
+        for (const input of inputs) {
+            // Use native setter to bypass React's synthetic event system
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value'
+            ).set;
+            nativeSetter.call(input, formatted);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            // Also fire a React-compatible focus/blur cycle
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
+    }""", [formatted])
+
+    await asyncio.sleep(0.3)
+    # Close any datepicker dropdown
+    await page.keyboard.press("Escape")
+    await asyncio.sleep(0.2)
+    await page.keyboard.press("Tab")
+
+
 # ─── Date fields ──────────────────────────────────────
 
 async def _fill_date_element(page: Page, el, value: str):
@@ -445,15 +564,33 @@ async def _fill_date_element(page: Page, el, value: str):
     if input_type == "date":
         await el.fill(value)
     else:
-        await el.click()
-        await asyncio.sleep(0.2)
-        await page.keyboard.press("Control+a")
-        await page.keyboard.press("Backspace")
-        for char in value:
-            await page.keyboard.type(char, delay=_typing_delay())
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.2)
-        await page.keyboard.press("Tab")
+        # Check if this is a React datepicker — use JS approach
+        is_dp = await el.evaluate("""e => {
+            const cls = (typeof e.className === 'string') ? e.className : '';
+            if (cls.includes('datepicker') || cls.includes('date-picker') ||
+                cls.includes('react-datepicker')) return true;
+            let node = e;
+            for (let i = 0; i < 6; i++) {
+                node = node.parentElement;
+                if (!node) break;
+                const pcls = (typeof node.className === 'string') ? node.className : '';
+                if (pcls.includes('datepicker') || pcls.includes('date-picker') ||
+                    pcls.includes('react-datepicker')) return true;
+            }
+            return false;
+        }""")
+        if is_dp:
+            await _fill_datepicker_via_js(page, el, value)
+        else:
+            await el.click()
+            await asyncio.sleep(0.2)
+            await page.keyboard.press("Control+a")
+            await page.keyboard.press("Backspace")
+            for char in value:
+                await page.keyboard.type(char, delay=_typing_delay())
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.2)
+            await page.keyboard.press("Tab")
 
 
 async def _fill_date(page: Page, selector: str, value: str):

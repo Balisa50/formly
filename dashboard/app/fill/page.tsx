@@ -3,11 +3,21 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { api } from "../lib/api";
 
-type Phase = "idle" | "working" | "asking" | "filling" | "done";
+type Phase = "idle" | "working" | "asking" | "filling" | "review" | "done";
 type LogEntry = {
   type: "progress" | "filled" | "asking" | "essay" | "filling" | "error" | "screenshot" | "user" | "done" | "ready";
   message: string;
   data?: any;
+};
+
+type ReviewField = {
+  label: string;
+  selector: string;
+  field_type: string;
+  value: string;
+  match_type: string;
+  confidence: number;
+  status: "filled" | "skipped";
 };
 
 export default function FillFormPage() {
@@ -30,6 +40,10 @@ export default function FillFormPage() {
   const [screenshot, setScreenshot] = useState("");
   const [fillStats, setFillStats] = useState<any>(null);
 
+  // Review state
+  const [reviewFields, setReviewFields] = useState<ReviewField[]>([]);
+  const [isRefilling, setIsRefilling] = useState(false);
+
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -39,6 +53,48 @@ export default function FillFormPage() {
   const addLog = useCallback((entry: LogEntry) => {
     setLog((prev) => [...prev, entry]);
   }, []);
+
+  // ── Build review fields from matches and fill stats ──
+  function buildReviewFields(matches: any[], stats: any): ReviewField[] {
+    const fields: ReviewField[] = [];
+    const seen = new Set<string>();
+
+    // Add all matches (filled fields)
+    for (const m of matches) {
+      const key = m.selector || m.label;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      fields.push({
+        label: m.label || m.selector || "Unknown field",
+        selector: m.selector,
+        field_type: m.field_type || "text",
+        value: m.value || "",
+        match_type: m.match_type || "unknown",
+        confidence: m.confidence ?? 0,
+        status: m.value ? "filled" : "skipped",
+      });
+    }
+
+    // Add skipped fields from stats if available
+    if (stats?.skipped_fields) {
+      for (const s of stats.skipped_fields) {
+        const key = s.selector || s.label;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        fields.push({
+          label: s.label || s.selector || "Unknown field",
+          selector: s.selector,
+          field_type: s.field_type || "text",
+          value: "",
+          match_type: "skipped",
+          confidence: 0,
+          status: "skipped",
+        });
+      }
+    }
+
+    return fields;
+  }
 
   // ── Start the agent ──────────────────────────────
   async function handleStart() {
@@ -53,6 +109,7 @@ export default function FillFormPage() {
     setEssayDrafts([]);
     setScreenshot("");
     setFillStats(null);
+    setReviewFields([]);
     setAgentUrl(url);
 
     try {
@@ -149,6 +206,7 @@ export default function FillFormPage() {
 
     try {
       const { events } = await api.agentFill(formUrl, matches, answers);
+      let latestStats: any = null;
 
       for (const event of events) {
         addLog({ type: event.type, message: event.message, data: event.data });
@@ -156,6 +214,7 @@ export default function FillFormPage() {
         if (event.type === "screenshot" && event.data?.screenshot) {
           setScreenshot(event.data.screenshot);
           setFillStats(event.data);
+          latestStats = event.data;
         }
       }
 
@@ -166,11 +225,50 @@ export default function FillFormPage() {
       });
       await api.logApplication(formUrl, pageContext, fieldsSnapshot);
 
-      setPhase("done");
+      // Build review fields and go to review phase instead of done
+      const fields = buildReviewFields(matches, latestStats);
+      setReviewFields(fields);
+      setPhase("review");
     } catch (err) {
       addLog({ type: "error", message: err instanceof Error ? err.message : "Fill failed" });
       setPhase("idle");
     }
+  }
+
+  // ── Re-fill with edited values ───────────────────
+  async function handleRefill() {
+    setIsRefilling(true);
+    // Build updated matches from review fields
+    const updatedMatches = reviewFields.map((f) => ({
+      selector: f.selector,
+      field_type: f.field_type,
+      label: f.label,
+      value: f.value,
+      match_type: f.match_type,
+      confidence: f.confidence,
+    }));
+    setFillMatches(updatedMatches);
+    setScreenshot("");
+    setFillStats(null);
+
+    await doFill(agentUrl, updatedMatches, gapAnswers);
+    setIsRefilling(false);
+  }
+
+  // ── Confirm review and proceed to done ───────────
+  function handleConfirmReview() {
+    setPhase("done");
+  }
+
+  // ── Update a review field value ──────────────────
+  function updateReviewField(index: number, newValue: string) {
+    setReviewFields((prev) =>
+      prev.map((f, i) =>
+        i === index
+          ? { ...f, value: newValue, status: newValue ? "filled" : "skipped" }
+          : f
+      )
+    );
   }
 
   // ── Skip remaining questions and fill what we have ──
@@ -200,7 +298,7 @@ export default function FillFormPage() {
       )}
 
       {/* Live Activity Feed */}
-      {phase !== "idle" && (
+      {phase !== "idle" && phase !== "review" && phase !== "done" && (
         <div className="bg-surface rounded-xl border border-border overflow-hidden">
           <div className="p-4 max-h-[500px] overflow-y-auto space-y-2">
             {log.map((entry, i) => (
@@ -263,52 +361,166 @@ export default function FillFormPage() {
         </div>
       )}
 
-      {/* Screenshot + Result */}
-      {phase === "done" && screenshot && (
+      {/* Review & Edit Section */}
+      {(phase === "review" || phase === "done") && (
         <div className="mt-4 space-y-4">
-          <div className="bg-surface rounded-xl border border-border p-5">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-full bg-green/10 flex items-center justify-center shrink-0">
-                <svg className="w-5 h-5 text-green" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+          {/* Review table — shown in review phase, collapsed in done */}
+          {phase === "review" && (
+            <div className="bg-surface rounded-xl border border-border overflow-hidden">
+              <div className="px-5 py-4 border-b border-border">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-accent/10 flex items-center justify-center shrink-0">
+                    <svg className="w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p className="font-bold text-lg">Review & Edit</p>
+                    <p className="text-text-muted text-sm">
+                      {reviewFields.filter((f) => f.status === "filled").length} filled,{" "}
+                      {reviewFields.filter((f) => f.status === "skipped").length} skipped
+                      — edit any value before re-filling.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="divide-y divide-white/5">
+                {reviewFields.map((field, i) => (
+                  <div key={field.selector || i} className="flex items-center gap-3 px-5 py-3">
+                    {/* Status icon */}
+                    <span className="shrink-0 text-base w-5 text-center" title={field.status === "filled" ? "Filled" : "Skipped"}>
+                      {field.status === "filled" ? (
+                        <svg className="w-4 h-4 text-green inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                        </svg>
+                      ) : (
+                        <svg className="w-4 h-4 text-amber-400 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      )}
+                    </span>
+
+                    {/* Field label */}
+                    <span className="text-sm text-text-secondary w-40 shrink-0 truncate" title={field.label}>
+                      {field.label}
+                    </span>
+
+                    {/* Editable value */}
+                    <input
+                      className="flex-1 bg-[#0a0a0a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-accent/50 transition-colors"
+                      value={field.value}
+                      placeholder={field.status === "skipped" ? "Enter a value..." : ""}
+                      onChange={(e) => updateReviewField(i, e.target.value)}
+                    />
+                  </div>
+                ))}
+
+                {reviewFields.length === 0 && (
+                  <div className="px-5 py-8 text-center text-text-muted text-sm">
+                    No fields were detected in this form.
+                  </div>
+                )}
+              </div>
+
+              {/* Review action buttons */}
+              <div className="px-5 py-4 border-t border-border flex gap-3">
+                <button
+                  onClick={handleRefill}
+                  disabled={isRefilling}
+                  className="bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-sm px-5 py-2.5 rounded-lg transition-colors inline-flex items-center gap-2"
+                >
+                  {isRefilling ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Re-filling...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      Re-fill with Changes
+                    </>
+                  )}
+                </button>
+
+                <a
+                  href={agentUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="border border-white/10 hover:border-white/20 text-white text-sm px-5 py-2.5 rounded-lg transition-colors inline-flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+                  </svg>
+                  Open Form to Submit
+                </a>
+
+                <button
+                  onClick={handleConfirmReview}
+                  className="ml-auto text-text-muted hover:text-text-secondary text-sm px-4 py-2.5 transition-colors"
+                >
+                  Looks Good
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Done state summary (after confirming review) */}
+          {phase === "done" && (
+            <div className="bg-surface rounded-xl border border-border p-5">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-full bg-green/10 flex items-center justify-center shrink-0">
+                  <svg className="w-5 h-5 text-green" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="font-bold text-lg">Form Filled!</p>
+                  <p className="text-text-muted text-sm">
+                    {fillStats?.filled || 0} fields filled{fillStats?.skipped > 0 ? `, ${fillStats.skipped} skipped` : ""}
+                    {fillStats?.pages > 1 ? ` across ${fillStats.pages} pages` : ""}.
+                  </p>
+                </div>
+              </div>
+
+              {fillStats?.errors?.length > 0 && (
+                <div className="bg-amber-400/10 text-amber-400 text-xs p-3 rounded-lg mb-4">
+                  <p className="font-medium mb-1">Issues:</p>
+                  {fillStats.errors.map((e: string, i: number) => <p key={i}>- {e}</p>)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Screenshot */}
+          {screenshot && (
+            <div className="bg-surface rounded-xl border border-border p-5">
+              <p className="text-xs text-text-muted mb-2">Screenshot of the filled form:</p>
+              <div className="border border-border rounded-lg overflow-hidden">
+                <img src={`data:image/png;base64,${screenshot}`} alt="Filled form" className="w-full" />
+              </div>
+            </div>
+          )}
+
+          {/* Bottom actions — shown in done phase */}
+          {phase === "done" && (
+            <div className="flex gap-3">
+              <a href={agentUrl} target="_blank" rel="noopener noreferrer"
+                className="bg-accent hover:bg-accent-hover text-white text-sm px-5 py-2.5 rounded-lg inline-flex items-center gap-2">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
                 </svg>
-              </div>
-              <div>
-                <p className="font-bold text-lg">Form Filled!</p>
-                <p className="text-text-muted text-sm">
-                  {fillStats?.filled || 0} fields filled{fillStats?.skipped > 0 ? `, ${fillStats.skipped} skipped` : ""}
-                  {fillStats?.pages > 1 ? ` across ${fillStats.pages} pages` : ""}.
-                </p>
-              </div>
+                Open Form to Review & Submit
+              </a>
+              <button onClick={() => {
+                setPhase("idle"); setUrl(""); setLog([]); setFillMatches([]); setGapQuestions([]);
+                setGapIndex(0); setGapAnswers({}); setEssayDrafts([]); setScreenshot(""); setFillStats(null);
+                setError(""); setReviewFields([]); setIsRefilling(false);
+              }} className="text-text-muted text-sm px-4 py-2.5">Fill Another Form</button>
             </div>
-
-            {fillStats?.errors?.length > 0 && (
-              <div className="bg-amber-400/10 text-amber-400 text-xs p-3 rounded-lg mb-4">
-                <p className="font-medium mb-1">Issues:</p>
-                {fillStats.errors.map((e: string, i: number) => <p key={i}>- {e}</p>)}
-              </div>
-            )}
-
-            <p className="text-xs text-text-muted mb-2">Screenshot of the filled form:</p>
-            <div className="border border-border rounded-lg overflow-hidden">
-              <img src={`data:image/png;base64,${screenshot}`} alt="Filled form" className="w-full" />
-            </div>
-          </div>
-
-          <div className="flex gap-3">
-            <a href={agentUrl} target="_blank" rel="noopener noreferrer"
-              className="bg-accent hover:bg-accent-hover text-white text-sm px-5 py-2.5 rounded-lg inline-flex items-center gap-2">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
-              </svg>
-              Open Form to Review & Submit
-            </a>
-            <button onClick={() => {
-              setPhase("idle"); setUrl(""); setLog([]); setFillMatches([]); setGapQuestions([]);
-              setGapIndex(0); setGapAnswers({}); setEssayDrafts([]); setScreenshot(""); setFillStats(null);
-              setError("");
-            }} className="text-text-muted text-sm px-4 py-2.5">Fill Another Form</button>
-          </div>
+          )}
         </div>
       )}
     </>

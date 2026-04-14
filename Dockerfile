@@ -6,7 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Force cache invalidation for source code
-RUN echo "build-v4-fix-all-3-fields"
+RUN echo "build-v5-smart-agent-review"
 COPY . .
 
 RUN mkdir -p data/uploads
