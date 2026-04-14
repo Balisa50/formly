@@ -202,6 +202,19 @@ def fill_with_answers(url: str, matches: list[dict], gap_answers: dict[str, str]
 
     try:
         result = fill_form(url, matches)
+
+        # Build per-field results for review screen
+        field_details = []
+        for fr in (result.field_results or []):
+            field_details.append({
+                "label": fr.label,
+                "selector": fr.selector,
+                "field_type": fr.field_type,
+                "value": fr.value,
+                "status": fr.status,
+                "error_message": fr.error_message,
+            })
+
         events.append(AgentEvent("screenshot", f"Filled {result.filled} fields, {result.skipped} skipped.",
                                  {
                                      "screenshot": result.screenshot_b64,
@@ -209,6 +222,7 @@ def fill_with_answers(url: str, matches: list[dict], gap_answers: dict[str, str]
                                      "skipped": result.skipped,
                                      "pages": result.pages_navigated,
                                      "errors": result.errors,
+                                     "field_results": field_details,
                                  }))
     except Exception as e:
         events.append(AgentEvent("error", f"Fill failed: {str(e)[:200]}"))
