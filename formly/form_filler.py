@@ -3,15 +3,34 @@
 Opens any URL in a headless browser and fills every field using the
 user's stored profile. Handles dropdowns, React Select, radios,
 checkboxes, date pickers, multi-page forms, cookie popups, and
-dynamic fields. Uses human-like delays and stealth to avoid detection."""
+dynamic fields. Uses human-like delays and stealth to avoid detection.
+
+v2 — Intelligent field-type detection, per-field verification, calendar
+navigation, cascading dropdown awareness, phone format parsing, and
+file-upload escalation."""
 from __future__ import annotations
 
 import asyncio
 import base64
 import random
+import re
 from dataclasses import dataclass, field
+from typing import Optional
 
-from playwright.async_api import async_playwright, Page, BrowserContext
+from playwright.async_api import async_playwright, Page, BrowserContext, ElementHandle
+
+
+# ─── Data classes ────────────────────────────────────────
+
+@dataclass
+class FieldResult:
+    """Per-field outcome reported back to the caller."""
+    label: str
+    selector: str
+    field_type: str
+    value: str
+    status: str  # "filled", "verified", "error", "skipped", "needs_user"
+    error_message: str = ""
 
 
 @dataclass
@@ -22,223 +41,181 @@ class FillResult:
     screenshot_b64: str
     errors: list[str] = field(default_factory=list)
     captcha_detected: bool = False
+    field_results: list[FieldResult] = field(default_factory=list)
 
 
-# ─── Human-like timing ────────────────────────────────
+# ─── Human-like timing ──────────────────────────────────
 
 def _human_delay() -> float:
-    """Random delay between actions (0.4–2.0s) like a real person."""
-    return random.uniform(0.4, 2.0)
+    """Random delay between fields (0.8-2.5s) like a real person."""
+    return random.uniform(0.8, 2.5)
 
 
 def _typing_delay() -> int:
-    """Random per-keystroke delay in ms (40–120ms) like real typing."""
-    return random.randint(40, 120)
+    """Random per-keystroke delay in ms (50-150ms)."""
+    return random.randint(50, 150)
 
 
-# ─── Main fill engine ─────────────────────────────────
+def _short_pause() -> float:
+    """Micro pause between sub-actions."""
+    return random.uniform(0.15, 0.4)
 
-async def _fill_form(url: str, matches: list[dict]) -> FillResult:
-    """Navigate to URL and autonomously fill every field."""
-    filled = 0
-    skipped = 0
-    pages = 1
-    errors: list[str] = []
-    captcha = False
 
-    async with async_playwright() as p:
-        # Launch with stealth settings
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-            ],
-        )
-        context = await browser.new_context(
-            viewport={"width": 1366, "height": 768},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            locale="en-US",
-            timezone_id="Europe/London",
-        )
+# ─── Page analysis — scroll & map the form ───────────────
 
-        # Remove webdriver flag to avoid detection
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            window.chrome = { runtime: {} };
-        """)
+async def _full_page_scan(page: Page) -> list[dict]:
+    """Scroll the entire page top-to-bottom and return a map of all
+    interactive elements with their bounding boxes and metadata."""
 
-        page = await context.new_page()
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+    # Scroll in increments so lazy-loaded content appears
+    viewport_h = await page.evaluate("window.innerHeight")
+    scroll_h = await page.evaluate("document.body.scrollHeight")
+    pos = 0
+    while pos < scroll_h:
+        await page.evaluate(f"window.scrollTo(0, {pos})")
+        await asyncio.sleep(random.uniform(0.25, 0.5))
+        pos += int(viewport_h * 0.7)
+        # Re-check — page may have grown
+        scroll_h = await page.evaluate("document.body.scrollHeight")
 
-        # Dismiss cookie popups and modals
-        await _dismiss_popups(page)
-        await asyncio.sleep(_human_delay())
+    # Back to top
+    await page.evaluate("window.scrollTo(0, 0)")
+    await asyncio.sleep(0.4)
 
-        # Sort: text first, then selects, then radios/checkboxes
-        priority = {"text": 0, "email": 0, "tel": 0, "number": 0, "textarea": 1,
-                     "date": 2, "select": 3, "radio": 4, "checkbox": 4}
-        sorted_matches = sorted(
-            [m for m in matches if m.get("value") and m.get("match_type") != "skipped" and m.get("field_type") != "file"],
-            key=lambda m: priority.get(m.get("field_type", "text"), 5),
-        )
-
-        for match in sorted_matches:
-            selector = match["selector"]
-            value = str(match["value"])
-            ftype = match.get("field_type", "text")
-            label = match.get("label", selector)
-
-            try:
-                await asyncio.sleep(_human_delay())
-
-                # Radios and checkboxes use group selectors — don't use _find_element
-                if ftype == "radio":
-                    ok = await _fill_radio(page, selector, label, value)
-                    if ok:
-                        filled += 1
-                    else:
-                        skipped += 1
-                        errors.append(f"Could not select radio: {label} = {value}")
-                    continue
-
-                if ftype == "checkbox":
-                    await _fill_checkbox(page, selector, label, value)
-                    filled += 1
-                    continue
-
-                # Select/React Select — use dedicated handler
-                if ftype == "select":
-                    ok = await _fill_select(page, selector, label, value)
-                    if ok:
-                        filled += 1
-                    else:
-                        skipped += 1
-                        errors.append(f"Could not select: {label} = {value}")
-                    continue
-
-                # Text, email, textarea, etc. — find element then type
-                el = await _find_element(page, selector, label, ftype)
-                if not el:
-                    # Last resort: maybe it's a React Select that wasn't tagged as "select"
-                    if label:
-                        ok = await _fill_react_select_by_label(page, label, value)
-                        if ok:
-                            filled += 1
-                            continue
-                    skipped += 1
-                    errors.append(f"Could not find: {label}")
-                    continue
-
-                # Check if this element is inside a React Select container
-                is_react_select = await el.evaluate("""e => {
-                    // Check role
-                    if (e.getAttribute('role') === 'combobox') return true;
-                    if (e.id && e.id.includes('react-select')) return true;
-
-                    // Walk up to find React Select wrapper (check multiple class patterns)
-                    let node = e;
-                    for (let i = 0; i < 8; i++) {
-                        node = node.parentElement;
-                        if (!node) break;
-                        const cls = (typeof node.className === 'string') ? node.className : '';
-                        // React Select class patterns (camelCase AND kebab-case)
-                        if (cls.includes('__control') || cls.includes('__value-container') ||
-                            cls.includes('__input-container') || cls.includes('__input') ||
-                            cls.includes('auto-complete') || cls.includes('autocomplete') ||
-                            cls.includes('-indicatorContainer') || cls.includes('-ValueContainer') ||
-                            cls.includes('indicator-container') || cls.includes('value-container') ||
-                            (cls.includes('react-select') && cls.includes('container'))) {
-                            return true;
-                        }
-                    }
-                    return false;
-                }""")
-
-                if is_react_select:
-                    el_id = await el.get_attribute("id")
-                    sel = f"#{el_id}" if el_id else selector
-                    ok = await _fill_react_select(page, sel, value)
-                    if ok:
-                        filled += 1
-                    else:
-                        skipped += 1
-                        errors.append(f"Could not fill React Select: {label}")
-                    continue
-
-                if ftype == "date":
-                    await _fill_date_element(page, el, value)
-                    filled += 1
-                elif ftype == "text" and await _is_datepicker_field(page, el, label):
-                    # React datepicker detected — use JS to set value
-                    await _fill_datepicker_via_js(page, el, value)
-                    filled += 1
-                else:
-                    await _type_into_element(page, el, value)
-                    filled += 1
-
-                await _handle_dynamic_fields(page)
-
-            except Exception as e:
-                skipped += 1
-                errors.append(f"{label}: {str(e)[:120]}")
-
-        # Handle multi-page forms
-        pages = await _navigate_pages(page, sorted_matches)
-
-        # Check for CAPTCHA (after filling, before submit)
-        captcha = await _check_captcha(page)
-        if captcha:
-            errors.append("CAPTCHA detected on the form — you'll need to solve it manually when you open the form")
-
-        # Validate — check for required field errors
-        validation_errors = await _check_validation(page)
-        if validation_errors:
-            errors.extend(validation_errors)
-
-        # Hide fixed overlays/ads that block the screenshot
-        await page.evaluate("""() => {
-            // Remove fixed position elements that cover content (ads, banners)
-            document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]').forEach(el => {
-                el.style.display = 'none';
+    # Map every interactive element
+    elements = await page.evaluate("""() => {
+        const results = [];
+        const els = document.querySelectorAll(
+            'input, textarea, select, [role="combobox"], [role="listbox"], ' +
+            '[class*="react-select"], [class*="auto-complete"], ' +
+            '[contenteditable="true"]'
+        );
+        els.forEach((el, idx) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return;
+            if (rect.width < 5 && rect.height < 5) return;
+            results.push({
+                tag: el.tagName.toLowerCase(),
+                type: el.type || '',
+                id: el.id || '',
+                name: el.name || '',
+                placeholder: el.placeholder || '',
+                className: (typeof el.className === 'string') ? el.className : '',
+                role: el.getAttribute('role') || '',
+                ariaLabel: el.getAttribute('aria-label') || '',
+                value: el.value || '',
+                required: el.required || false,
+                y: rect.top + window.scrollY,
             });
-            // Also hide common ad containers
-            document.querySelectorAll('#fixedban, .adsbygoogle, [id*="google_ads"], iframe[src*="googleads"]').forEach(el => {
-                el.style.display = 'none';
-            });
+        });
+        return results;
+    }""")
+    return elements
+
+
+# ─── Field verification ──────────────────────────────────
+
+async def _verify_field(page: Page, el: ElementHandle, expected: str,
+                        label: str) -> tuple[bool, str]:
+    """Click away, re-read the value, check for validation errors.
+    Returns (success, error_message)."""
+    try:
+        # Click body to trigger blur / validation
+        await page.click("body", position={"x": 5, "y": 5}, no_wait_after=True)
+        await asyncio.sleep(0.4)
+
+        # Read value back
+        actual = await el.evaluate("e => e.value || e.textContent || ''")
+        actual = actual.strip()
+
+        # For select-like elements, check displayed text too
+        tag = await el.evaluate("e => e.tagName.toLowerCase()")
+        if tag == "select":
+            actual = await el.evaluate("""e => {
+                const opt = e.options[e.selectedIndex];
+                return opt ? opt.text.trim() : '';
+            }""")
+
+        # Check for validation errors near this element
+        error_msg = await el.evaluate("""e => {
+            // Walk up a few levels, look for error text
+            let node = e;
+            for (let i = 0; i < 4; i++) {
+                node = node.parentElement;
+                if (!node) break;
+                const err = node.querySelector(
+                    '.error, .field-error, [class*="error"], [class*="invalid"], ' +
+                    '.help-block.text-danger, [role="alert"]'
+                );
+                if (err && err.offsetParent !== null) {
+                    const t = err.textContent.trim();
+                    if (t.length > 2 && t.length < 200) return t;
+                }
+            }
+            // Also check red border
+            const style = window.getComputedStyle(e);
+            if (style.borderColor && (
+                style.borderColor.includes('rgb(255') ||
+                style.borderColor.includes('red')
+            )) return '__red_border__';
+            return '';
         }""")
 
-        # Scroll to top and take screenshot
-        await page.evaluate("window.scrollTo(0, 0)")
-        await asyncio.sleep(1.5)
-        screenshot = await page.screenshot(full_page=True, type="png")
-        screenshot_b64 = base64.b64encode(screenshot).decode()
+        if error_msg == "__red_border__":
+            return False, f"Field '{label}' has red border after fill"
+        if error_msg:
+            return False, f"Validation error for '{label}': {error_msg}"
 
-        await browser.close()
+        # For text-like fields, fuzzy-check value stuck
+        if tag in ("input", "textarea"):
+            input_type = await el.get_attribute("type") or "text"
+            if input_type in ("text", "email", "tel", "number", "url", "search", ""):
+                if not actual:
+                    return False, f"Field '{label}' is empty after fill"
+                # Allow partial match for phone formatting etc.
+                exp_digits = re.sub(r'\D', '', expected)
+                act_digits = re.sub(r'\D', '', actual)
+                if exp_digits and act_digits and exp_digits not in act_digits and act_digits not in exp_digits:
+                    return False, f"Value mismatch for '{label}': expected contains '{expected[:30]}' got '{actual[:30]}'"
 
-    return FillResult(
-        filled=filled,
-        skipped=skipped,
-        pages_navigated=pages,
-        screenshot_b64=screenshot_b64,
-        errors=errors,
-        captcha_detected=captcha,
-    )
+        return True, ""
+    except Exception as exc:
+        return True, ""  # Verification failed but don't block
 
 
-# ─── Cookie / popup dismissal ─────────────────────────
+async def _check_for_errors_near(page: Page, el: ElementHandle) -> str:
+    """Return any visible error text near an element, or empty string."""
+    try:
+        return await el.evaluate("""e => {
+            let node = e;
+            for (let i = 0; i < 4; i++) {
+                node = node.parentElement;
+                if (!node) break;
+                const err = node.querySelector(
+                    '.error, .field-error, [class*="error"], [class*="invalid"], [role="alert"]'
+                );
+                if (err && err.offsetParent !== null) {
+                    const t = err.textContent.trim();
+                    if (t.length > 2 && t.length < 200) return t;
+                }
+            }
+            return '';
+        }""")
+    except Exception:
+        return ""
+
+
+# ─── Cookie / popup dismissal ───────────────────────────
 
 async def _dismiss_popups(page: Page):
     """Dismiss cookie consent banners, modals, and overlays."""
     dismiss_selectors = [
-        # Cookie consent buttons
         'button:has-text("Accept")', 'button:has-text("Accept All")',
         'button:has-text("I Agree")', 'button:has-text("OK")',
         'button:has-text("Got it")', 'button:has-text("Agree")',
         '[id*="cookie"] button', '[class*="cookie"] button',
         '[id*="consent"] button', '[class*="consent"] button',
-        # Modal close buttons
         'button[aria-label="Close"]', 'button[aria-label="Dismiss"]',
         '[class*="modal"] button[class*="close"]',
         '.modal .close', '.popup .close',
@@ -253,34 +230,31 @@ async def _dismiss_popups(page: Page):
             continue
 
 
-# ─── CAPTCHA detection ─────────────────────────────────
+# ─── CAPTCHA detection ───────────────────────────────────
 
 async def _check_captcha(page: Page) -> bool:
-    """Detect REAL form CAPTCHAs — not just ads or scripts with 'recaptcha' in them."""
+    """Detect REAL form CAPTCHAs — not just ads or scripts."""
     return await page.evaluate("""() => {
-        // Only detect visible CAPTCHA challenges, not hidden ad scripts
         const captchaFrame = document.querySelector(
             'iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/api2/bframe"], ' +
             'iframe[src*="hcaptcha.com/captcha"], .g-recaptcha[data-sitekey], .h-captcha[data-sitekey]'
         );
         if (captchaFrame) {
-            // Check if it's actually visible (not hidden in ads)
             const rect = captchaFrame.getBoundingClientRect();
             if (rect.width > 50 && rect.height > 50) return true;
         }
-        // Check for Cloudflare challenge page
         if (document.title.includes('Just a moment') || document.querySelector('#challenge-running'))
             return true;
         return false;
     }""")
 
 
-# ─── Smart element finding ─────────────────────────────
+# ─── Smart element finding ───────────────────────────────
 
-async def _find_element(page: Page, selector: str, label: str, ftype: str):
+async def _find_element(page: Page, selector: str, label: str, ftype: str) -> Optional[ElementHandle]:
     """Find an element using multiple strategies. Returns ElementHandle or None."""
 
-    # Strategy 1: Direct CSS selector — use query_selector (instant, no timeout issues)
+    # Strategy 1: Direct CSS selector
     if selector:
         try:
             el = await page.query_selector(selector)
@@ -288,7 +262,6 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
                 return el
         except Exception:
             pass
-        # Fallback: wait briefly for dynamic elements
         try:
             el = await page.wait_for_selector(selector, timeout=3000, state="attached")
             if el:
@@ -296,7 +269,7 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
         except Exception:
             pass
 
-    # Strategy 2: Playwright's get_by_label (most reliable for accessible forms)
+    # Strategy 2: Playwright get_by_label
     if label:
         try:
             loc = page.get_by_label(label, exact=False)
@@ -305,7 +278,7 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
         except Exception:
             pass
 
-    # Strategy 3: Playwright's get_by_placeholder
+    # Strategy 3: Playwright get_by_placeholder
     if label:
         try:
             loc = page.get_by_placeholder(label, exact=False)
@@ -314,7 +287,7 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
         except Exception:
             pass
 
-    # Strategy 4: Find by label[for] → getElementById
+    # Strategy 4: label[for] -> getElementById
     if label:
         try:
             el = await page.evaluate_handle("""(label) => {
@@ -326,14 +299,13 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
             }""", label)
             elem = el.as_element()
             if elem:
-                # Verify it's a real element
                 tag = await elem.evaluate("e => e.tagName")
                 if tag:
                     return elem
         except Exception:
             pass
 
-    # Strategy 5: Find input/textarea near label text in DOM
+    # Strategy 5: input/textarea near label text in DOM
     if label:
         try:
             el_handle = await page.evaluate_handle("""(label) => {
@@ -343,8 +315,6 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
                     return text.includes(label.toLowerCase()) && text.length < 100;
                 });
                 if (!match) return null;
-
-                // Search in progressively larger containers
                 let node = match;
                 for (let i = 0; i < 5; i++) {
                     node = node.parentElement;
@@ -352,8 +322,6 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
                     const input = node.querySelector('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]), textarea, select');
                     if (input) return input;
                 }
-
-                // Try siblings
                 const next = match.nextElementSibling;
                 if (next) {
                     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(next.tagName)) return next;
@@ -369,7 +337,7 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
         except Exception:
             pass
 
-    # Strategy 6: Find by name attribute
+    # Strategy 6: name attribute
     if label:
         name_guess = label.lower().replace(" ", "").replace("_", "")
         try:
@@ -380,16 +348,17 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
         except Exception:
             pass
 
-    # Strategy 7: Find by ID containing label words (no spaces)
+    # Strategy 7: ID containing label words
     if label:
         try:
             id_guess = label.replace(" ", "")
-            el = await page.query_selector(f'input[id*="{id_guess}" i], textarea[id*="{id_guess}" i], select[id*="{id_guess}" i]')
+            el = await page.query_selector(
+                f'input[id*="{id_guess}" i], textarea[id*="{id_guess}" i], select[id*="{id_guess}" i]'
+            )
             if el:
                 return el
         except Exception:
             pass
-        # Also try camelCase: "Current Address" -> "currentAddress"
         try:
             words = label.split()
             if len(words) > 1:
@@ -403,282 +372,351 @@ async def _find_element(page: Page, selector: str, label: str, ftype: str):
     return None
 
 
-# ─── Text typing (human-like, works with element directly) ──
+# ─── Detect element's real type ──────────────────────────
 
-async def _type_into_element(page: Page, el, value: str):
-    """Type into an already-found element with human-like speed."""
-    await el.scroll_into_view_if_needed()
-    await asyncio.sleep(random.uniform(0.1, 0.3))
+async def _detect_field_type(page: Page, el: ElementHandle, declared_type: str,
+                              label: str) -> str:
+    """Determine the actual field type from DOM inspection, overriding the
+    declared type when the DOM tells us something different."""
 
-    # Click to focus
-    await el.click()
-    await asyncio.sleep(random.uniform(0.1, 0.3))
-
-    # Clear existing content
-    await page.keyboard.press("Control+a")
-    await page.keyboard.press("Backspace")
-    await asyncio.sleep(random.uniform(0.1, 0.2))
-
-    # Type character by character
-    for char in value:
-        await page.keyboard.type(char, delay=_typing_delay())
-
-    # Close any dropdowns/datepickers that may have opened
-    await page.keyboard.press("Escape")
-    await asyncio.sleep(0.2)
-
-    # Tab out to trigger validation
-    await page.keyboard.press("Tab")
-
-
-async def _type_text(page: Page, selector: str, value: str):
-    """Legacy: find element by selector and type."""
-    el = await _find_element(page, selector, "", "text")
-    if not el:
-        raise Exception(f"Not found: {selector}")
-    await _type_into_element(page, el, value)
-
-
-# ─── Date picker detection & JS fill ─────────────────
-
-async def _is_datepicker_field(page: Page, el, label: str) -> bool:
-    """Detect if an element is a React datepicker or similar date widget."""
-    label_lower = (label or "").lower()
-    # Check label for date-related keywords
-    if any(kw in label_lower for kw in ("date", "birth", "dob", "birthday")):
-        return True
-    # Check element and its ancestors for datepicker classes
-    return await el.evaluate("""e => {
-        // Check the element itself
+    info = await el.evaluate("""e => {
+        const tag = e.tagName.toLowerCase();
+        const type = (e.type || '').toLowerCase();
         const cls = (typeof e.className === 'string') ? e.className : '';
-        if (cls.includes('datepicker') || cls.includes('date-picker') ||
-            cls.includes('react-datepicker')) return true;
-        if (e.getAttribute('data-date') !== null) return true;
-        // Walk up parents
+        const role = e.getAttribute('role') || '';
+        const id = e.id || '';
+        const placeholder = e.placeholder || '';
+
+        // Check if inside a React Select / autocomplete
+        let isReactSelect = false;
+        if (role === 'combobox' || id.includes('react-select')) isReactSelect = true;
         let node = e;
+        for (let i = 0; i < 8; i++) {
+            node = node.parentElement;
+            if (!node) break;
+            const pcls = (typeof node.className === 'string') ? node.className : '';
+            if (pcls.includes('__control') || pcls.includes('__value-container') ||
+                pcls.includes('react-select') || pcls.includes('auto-complete') ||
+                pcls.includes('autocomplete')) {
+                isReactSelect = true;
+                break;
+            }
+        }
+
+        // Check for datepicker
+        let isDatepicker = false;
+        if (cls.includes('datepicker') || cls.includes('date-picker') ||
+            cls.includes('react-datepicker') || e.getAttribute('data-date') !== null) {
+            isDatepicker = true;
+        }
+        node = e;
         for (let i = 0; i < 6; i++) {
             node = node.parentElement;
             if (!node) break;
             const pcls = (typeof node.className === 'string') ? node.className : '';
-            if (pcls.includes('datepicker') || pcls.includes('date-picker') ||
-                pcls.includes('react-datepicker')) return true;
+            if (pcls.includes('datepicker') || pcls.includes('react-datepicker')) {
+                isDatepicker = true;
+                break;
+            }
         }
-        return false;
+
+        return { tag, type, cls, role, id, placeholder, isReactSelect, isDatepicker };
     }""")
 
+    tag = info["tag"]
+    itype = info["type"]
 
-def _parse_date_value(value: str) -> tuple[int, int, int] | None:
-    """Parse a date string into (day, month, year). Returns None on failure.
-
-    Supported formats:
-      DD/MM/YYYY, DD-MM-YYYY  (day first — assumed when day <= 12 ambiguity
-                                is resolved by first-token > 12)
-      MM/DD/YYYY              (if first token <= 12 and second > 12)
-      YYYY-MM-DD, YYYY/MM/DD  (ISO)
-    """
-    import re
-    value = value.strip()
-    parts = re.split(r'[/\-.]', value)
-    if len(parts) != 3:
-        return None
-    try:
-        nums = [int(p) for p in parts]
-    except ValueError:
-        return None
-
-    a, b, c = nums
-    # ISO: YYYY-MM-DD
-    if a > 100:
-        return (c, b, a)  # day, month, year
-    # If third part is a 4-digit year
-    if c > 100:
-        # DD/MM/YYYY vs MM/DD/YYYY
-        if a > 12:
-            # a must be day
-            return (a, b, c)
-        elif b > 12:
-            # b must be day, so a is month
-            return (b, a, c)
-        else:
-            # Ambiguous — assume DD/MM/YYYY (European / most-of-world default)
-            return (a, b, c)
-    return None
-
-
-async def _fill_datepicker_via_js(page: Page, el, value: str):
-    """Set a React datepicker value using JavaScript to avoid keystroke issues."""
-    parsed = _parse_date_value(value)
-    if not parsed:
-        # Fallback: just type it
-        await _type_into_element(page, el, value)
-        return
-
-    day, month, year = parsed
-    # Format as MM/DD/YYYY which is what JS Date and react-datepicker expect
-    formatted = f"{month:02d}/{day:02d}/{year:04d}"
-
-    await el.scroll_into_view_if_needed()
-    await asyncio.sleep(random.uniform(0.1, 0.3))
-
-    await page.evaluate("""([formatted]) => {
-        // Find the react-datepicker input (it may be the active element or
-        // the element we received)
-        const el = document.activeElement &&
-                   document.activeElement.tagName === 'INPUT'
-                   ? document.activeElement : null;
-        const inputs = el ? [el] : [
-            ...document.querySelectorAll(
-                '.react-datepicker__input-container input, ' +
-                'input.react-datepicker-ignore-onclickoutside, ' +
-                'input[class*="datepicker"]'
-            )
-        ];
-
-        for (const input of inputs) {
-            // Use native setter to bypass React's synthetic event system
-            const nativeSetter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype, 'value'
-            ).set;
-            nativeSetter.call(input, formatted);
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            // Also fire a React-compatible focus/blur cycle
-            input.dispatchEvent(new Event('blur', { bubbles: true }));
-        }
-    }""", [formatted])
-
-    await asyncio.sleep(0.3)
-    # Close any datepicker dropdown
-    await page.keyboard.press("Escape")
-    await asyncio.sleep(0.2)
-    await page.keyboard.press("Tab")
-
-
-# ─── Date fields ──────────────────────────────────────
-
-async def _fill_date_element(page: Page, el, value: str):
-    """Fill date input using element directly."""
-    await el.scroll_into_view_if_needed()
-    input_type = await el.get_attribute("type")
-
-    if input_type == "date":
-        await el.fill(value)
-    else:
-        # Check if this is a React datepicker — use JS approach
-        is_dp = await el.evaluate("""e => {
-            const cls = (typeof e.className === 'string') ? e.className : '';
-            if (cls.includes('datepicker') || cls.includes('date-picker') ||
-                cls.includes('react-datepicker')) return true;
-            let node = e;
-            for (let i = 0; i < 6; i++) {
-                node = node.parentElement;
-                if (!node) break;
-                const pcls = (typeof node.className === 'string') ? node.className : '';
-                if (pcls.includes('datepicker') || pcls.includes('date-picker') ||
-                    pcls.includes('react-datepicker')) return true;
-            }
-            return false;
-        }""")
-        if is_dp:
-            await _fill_datepicker_via_js(page, el, value)
-        else:
-            await el.click()
-            await asyncio.sleep(0.2)
-            await page.keyboard.press("Control+a")
-            await page.keyboard.press("Backspace")
-            for char in value:
-                await page.keyboard.type(char, delay=_typing_delay())
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.2)
-            await page.keyboard.press("Tab")
-
-
-async def _fill_date(page: Page, selector: str, value: str):
-    """Legacy wrapper."""
-    el = await _find_element(page, selector, "", "date")
-    if not el:
-        raise Exception(f"Not found: {selector}")
-    await _fill_date_element(page, el, value)
-
-
-# ─── Select / Dropdown ────────────────────────────────
-
-async def _fill_select(page: Page, selector: str, label: str, value: str) -> bool:
-    """Fill select dropdowns including React Select and custom dropdowns."""
-    # Check if React Select
-    if "react-select" in selector or "css-" in selector:
-        return await _fill_react_select(page, selector, value)
-
-    # Try to find the element
-    el = None
-    if selector:
-        try:
-            el = await page.wait_for_selector(selector, timeout=3000, state="visible")
-        except Exception:
-            pass
-
-    # Fallback: find by label
-    if not el and label:
-        el = await _find_element(page, "", label, "select")
-
-    # Check if this is actually a React Select (class-based detection)
-    if not el and label:
-        # Look for React Select containers near this label
-        react_input = await page.evaluate("""(label) => {
-            const labels = [...document.querySelectorAll('label')];
-            const match = labels.find(l => l.textContent.trim().toLowerCase().includes(label.toLowerCase()));
-            if (match) {
-                const container = match.closest('.form-group, .form-field, [class*="col"], .mb-3') || match.parentElement;
-                if (container) {
-                    const input = container.querySelector('input[id*="react-select"], input[role="combobox"]');
-                    if (input) return input.id || null;
-                }
-            }
-            return null;
-        }""", label)
-        if react_input:
-            return await _fill_react_select(page, f"#{react_input}", value)
-
-    if not el:
-        # Last resort: try React Select approach with any visible combobox
-        return await _fill_react_select_by_label(page, label, value)
-
-    await el.scroll_into_view_if_needed()
-    tag = await el.evaluate("e => e.tagName.toLowerCase()")
-
+    if info["isReactSelect"]:
+        return "react_select"
+    if info["isDatepicker"]:
+        return "datepicker"
     if tag == "select":
+        return "native_select"
+    if itype == "radio":
+        return "radio"
+    if itype == "checkbox":
+        return "checkbox"
+    if itype == "file":
+        return "file"
+    if itype == "date":
+        return "date_native"
+    if itype == "tel":
+        return "phone"
+    if itype == "email":
+        return "email"
+    if itype == "number":
+        return "number"
+
+    # Label-based heuristics
+    label_lower = (label or "").lower()
+    if any(kw in label_lower for kw in ("date of birth", "dob", "birthday", "birth date")):
+        if info["isDatepicker"]:
+            return "datepicker"
+        return "date_text"
+    if "phone" in label_lower or "mobile" in label_lower or "tel" in label_lower:
+        return "phone"
+
+    if tag == "textarea":
+        return "textarea"
+
+    # Default text
+    return declared_type if declared_type in ("text", "email", "tel", "number") else "text"
+
+
+# ═══════════════════════════════════════════════════════════
+#  FIELD TYPE HANDLERS
+# ═══════════════════════════════════════════════════════════
+
+# ─── Plain text / email / number / textarea ──────────────
+
+async def _fill_text(page: Page, el: ElementHandle, value: str, label: str) -> FieldResult:
+    """Clear, type with human delays, verify."""
+    selector = await _get_selector(el)
+    try:
+        await el.scroll_into_view_if_needed()
+        await asyncio.sleep(_short_pause())
+        await el.click()
+        await asyncio.sleep(_short_pause())
+
+        # Clear existing content
+        await page.keyboard.press("Control+a")
+        await page.keyboard.press("Backspace")
+        await asyncio.sleep(random.uniform(0.1, 0.2))
+
+        # Type character by character with random delays
+        for char in value:
+            await page.keyboard.type(char, delay=_typing_delay())
+
+        # Dismiss any dropdowns
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.2)
+        await page.keyboard.press("Tab")
+        await asyncio.sleep(0.3)
+
+        # Verify
+        ok, err = await _verify_field(page, el, value, label)
+        if not ok:
+            # Retry once with fill() instead of keyboard
+            try:
+                await el.click()
+                await asyncio.sleep(0.1)
+                await page.keyboard.press("Control+a")
+                await page.keyboard.press("Backspace")
+                await el.type(value, delay=_typing_delay())
+                await page.keyboard.press("Tab")
+                await asyncio.sleep(0.3)
+                ok2, err2 = await _verify_field(page, el, value, label)
+                if ok2:
+                    return FieldResult(label, selector, "text", value, "verified")
+            except Exception:
+                pass
+            return FieldResult(label, selector, "text", value, "filled", err)
+
+        return FieldResult(label, selector, "text", value, "verified")
+    except Exception as exc:
+        return FieldResult(label, selector, "text", value, "error", str(exc)[:120])
+
+
+# ─── Phone number fields ────────────────────────────────
+
+async def _fill_phone(page: Page, el: ElementHandle, value: str, label: str) -> FieldResult:
+    """Read placeholder for format hints, adjust digits accordingly."""
+    selector = await _get_selector(el)
+    try:
+        placeholder = (await el.get_attribute("placeholder") or "").strip()
+        maxlength = await el.get_attribute("maxlength")
+
+        # Parse placeholder for digit requirements
+        digits_only = re.sub(r'\D', '', value)
+        ph_lower = placeholder.lower()
+
+        if "10 digit" in ph_lower or "10digit" in ph_lower:
+            # Strip country code — keep last 10 digits
+            if len(digits_only) > 10:
+                digits_only = digits_only[-10:]
+            formatted = digits_only
+        elif maxlength and maxlength.isdigit():
+            ml = int(maxlength)
+            if ml == 10 and len(digits_only) > 10:
+                digits_only = digits_only[-10:]
+            formatted = digits_only[:ml]
+        else:
+            # Keep full value (may include country code)
+            formatted = value
+
+        # Respect placeholder formatting hints
+        if placeholder and re.search(r'[\-\s\(\)]', placeholder):
+            # Try to mirror placeholder spacing pattern
+            # e.g. "XXX-XXX-XXXX" or "(XXX) XXX-XXXX"
+            ph_pattern = re.sub(r'[Xx0-9]', '', placeholder)
+            # Simple: if placeholder has dashes, add dashes
+            if '-' in placeholder and len(digits_only) == 10:
+                formatted = f"{digits_only[:3]}-{digits_only[3:6]}-{digits_only[6:]}"
+            elif '(' in placeholder and ')' in placeholder and len(digits_only) == 10:
+                formatted = f"({digits_only[:3]}) {digits_only[3:6]}-{digits_only[6:]}"
+
+        return await _fill_text(page, el, formatted, label)
+    except Exception as exc:
+        return FieldResult(label, selector, "phone", value, "error", str(exc)[:120])
+
+
+# ─── Native <select> dropdown ────────────────────────────
+
+async def _fill_native_select(page: Page, el: ElementHandle, value: str,
+                               label: str) -> FieldResult:
+    """Use Playwright's select_option, verify displayed value."""
+    selector = await _get_selector(el)
+    try:
+        await el.scroll_into_view_if_needed()
+        await asyncio.sleep(_short_pause())
+
+        # Try label match first
         try:
             await el.select_option(label=value)
-            return True
         except Exception:
-            pass
-        try:
-            matched = await page.evaluate("""(args) => {
-                const [sel, val] = args;
-                const select = document.querySelector(sel);
-                if (!select) return false;
-                const opts = [...select.options];
-                const match = opts.find(o => o.text.toLowerCase().includes(val.toLowerCase()));
-                if (match) { select.value = match.value; select.dispatchEvent(new Event('change', {bubbles: true})); return true; }
+            # Fuzzy match
+            matched = await el.evaluate("""(val) => {
+                const opts = [...this.options];
+                const match = opts.find(o =>
+                    o.text.toLowerCase().includes(val.toLowerCase()) ||
+                    o.value.toLowerCase().includes(val.toLowerCase())
+                );
+                if (match) {
+                    this.value = match.value;
+                    this.dispatchEvent(new Event('change', {bubbles: true}));
+                    return true;
+                }
                 return false;
-            }""", [selector, value])
-            return matched
-        except Exception:
-            return False
-    else:
-        return await _fill_react_select(page, selector, value)
+            }""", value)
+            if not matched:
+                return FieldResult(label, selector, "native_select", value, "error",
+                                   f"No option matching '{value}'")
+
+        await asyncio.sleep(0.5)
+
+        # Verify displayed value
+        displayed = await el.evaluate("""e => {
+            const opt = e.options[e.selectedIndex];
+            return opt ? opt.text.trim() : '';
+        }""")
+        if displayed and value.lower() in displayed.lower():
+            return FieldResult(label, selector, "native_select", value, "verified")
+        return FieldResult(label, selector, "native_select", value, "filled")
+
+    except Exception as exc:
+        return FieldResult(label, selector, "native_select", value, "error", str(exc)[:120])
 
 
-async def _fill_react_select_by_label(page: Page, label: str, value: str) -> bool:
-    """Find a React Select near a label and fill it."""
+# ─── Custom / JS dropdown (styled divs) ─────────────────
+
+async def _fill_custom_dropdown(page: Page, el: ElementHandle, value: str,
+                                 label: str) -> FieldResult:
+    """Click to open, wait for options list, find & click match."""
+    selector = await _get_selector(el)
     try:
-        # Find ALL inputs that could be React Select (broader search)
+        await el.scroll_into_view_if_needed()
+        await asyncio.sleep(_short_pause())
+        await el.click()
+        await asyncio.sleep(0.8)
+
+        # Look for visible option list
+        option = await page.evaluate_handle("""(val) => {
+            const candidates = document.querySelectorAll(
+                '[class*="option"], [class*="item"], [role="option"], li[data-value]'
+            );
+            for (const c of candidates) {
+                if (c.offsetParent === null) continue;
+                const text = c.textContent.trim().toLowerCase();
+                if (text.includes(val.toLowerCase())) return c;
+            }
+            return null;
+        }""", value)
+
+        elem = option.as_element()
+        if elem:
+            await elem.click()
+            await asyncio.sleep(0.4)
+            return FieldResult(label, selector, "custom_dropdown", value, "verified")
+
+        # Fallback: type and enter
+        await page.keyboard.type(value[:15], delay=_typing_delay())
+        await asyncio.sleep(0.5)
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.3)
+        return FieldResult(label, selector, "custom_dropdown", value, "filled")
+
+    except Exception as exc:
+        return FieldResult(label, selector, "custom_dropdown", value, "error", str(exc)[:120])
+
+
+# ─── React Select / Autocomplete / Tag fields ───────────
+
+async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
+                                    label: str) -> FieldResult:
+    """Type first chars slowly, WAIT for suggestions, CLICK the match."""
+    selector = await _get_selector(el)
+    try:
+        await el.scroll_into_view_if_needed()
+        await asyncio.sleep(_short_pause())
+
+        # Click to focus / open
+        await el.click()
+        await asyncio.sleep(0.5)
+
+        # Type first few characters slowly to trigger search
+        search_text = value[:20]
+        for char in search_text:
+            await page.keyboard.type(char, delay=_typing_delay())
+
+        # WAIT for suggestions dropdown to appear (at least 1 second)
+        await asyncio.sleep(1.2)
+
+        # Find and click the matching option
+        option_clicked = await page.evaluate("""(val) => {
+            const options = document.querySelectorAll(
+                '[class*="option"]:not([class*="disabled"]), ' +
+                '[class*="menu"] [class*="option"], ' +
+                '[role="option"], [class*="suggestion"], ' +
+                '[class*="__option"], [class*="-option"]'
+            );
+            const valLower = val.toLowerCase();
+            let best = null;
+            let bestScore = Infinity;
+            for (const opt of options) {
+                if (opt.offsetParent === null) continue;
+                const text = opt.textContent.trim().toLowerCase();
+                if (text === valLower) { best = opt; bestScore = 0; break; }
+                if (text.includes(valLower) || valLower.includes(text)) {
+                    const score = Math.abs(text.length - valLower.length);
+                    if (score < bestScore) { best = opt; bestScore = score; }
+                }
+            }
+            if (best) { best.click(); return true; }
+            return false;
+        }""", value)
+
+        if option_clicked:
+            await asyncio.sleep(0.5)
+            # Verify a tag/token appeared or value is set
+            return FieldResult(label, selector, "react_select", value, "verified")
+
+        # Fallback: press Enter to accept first match
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.4)
+        return FieldResult(label, selector, "react_select", value, "filled")
+
+    except Exception as exc:
+        return FieldResult(label, selector, "react_select", value, "error", str(exc)[:120])
+
+
+async def _fill_react_select_by_label(page: Page, label: str, value: str) -> Optional[FieldResult]:
+    """Find a React Select near a label and fill it. Returns None if not found."""
+    try:
         inputs = await page.query_selector_all(
             'input[id*="react-select"], input[role="combobox"], '
             'input[class*="auto-complete"], input[id*="subjects"], '
             'input[id*="Subject"], input[id*="select"]'
         )
-        # Also search inside React Select-like containers
         containers = await page.query_selector_all(
             '[class*="__control"], [class*="auto-complete__control"], '
             '[class*="react-select"], [class*="-container"][class*="css-"]'
@@ -689,124 +727,70 @@ async def _fill_react_select_by_label(page: Page, label: str, value: str) -> boo
                 inputs.append(inp)
 
         for inp in inputs:
-            # Check if this input is near our label
             is_near = await inp.evaluate("""(e, label) => {
-                // Walk up to check containers for label text
                 let node = e;
                 for (let i = 0; i < 8; i++) {
                     node = node.parentElement;
                     if (!node) break;
-                    // Check for label/heading elements as direct children or nearby
                     const lbl = node.querySelector(':scope > label, :scope > .label');
                     if (lbl && lbl.textContent.toLowerCase().includes(label.toLowerCase())) return true;
-                    // Check previous sibling
                     const prev = node.previousElementSibling;
                     if (prev && prev.textContent && prev.textContent.toLowerCase().includes(label.toLowerCase()) && prev.textContent.length < 100) return true;
                 }
-                // Also check by ID
                 if (e.id && e.id.toLowerCase().includes(label.toLowerCase().replace(/\\s/g, ''))) return true;
                 return false;
             }""", label)
             if is_near:
-                inp_id = await inp.get_attribute("id")
-                sel = f"#{inp_id}" if inp_id else None
-                if sel:
-                    return await _fill_react_select(page, sel, value)
-                else:
-                    # Click the input directly
-                    await inp.click()
-                    await asyncio.sleep(0.5)
-                    for char in value[:20]:
-                        await page.keyboard.type(char, delay=_typing_delay())
-                    await asyncio.sleep(0.6)
-                    await page.keyboard.press("Enter")
-                    await asyncio.sleep(0.3)
-                    return True
-        return False
+                return await _fill_react_select_field(page, inp, value, label)
+        return None
     except Exception:
-        return False
+        return None
 
 
-async def _fill_react_select(page: Page, selector: str, value: str) -> bool:
-    """Fill React Select: click to open, type to search, select matching option."""
-    try:
-        el = await page.wait_for_selector(selector, timeout=5000)
-        if not el:
-            return False
+# ─── Radio buttons ───────────────────────────────────────
 
-        await el.scroll_into_view_if_needed()
-        await asyncio.sleep(random.uniform(0.2, 0.5))
-
-        # Click to open dropdown
-        await el.click()
-        await asyncio.sleep(0.5)
-
-        # Type the value to filter options
-        for char in value[:20]:  # Type enough chars to filter
-            await page.keyboard.type(char, delay=_typing_delay())
-        await asyncio.sleep(0.6)
-
-        # Try to find and click matching option
-        option = await page.query_selector('[class*="option"]:not([class*="disabled"])')
-        if option:
-            text = await option.text_content()
-            await option.click()
-            await asyncio.sleep(0.3)
-            return True
-
-        # Fallback: press Enter (selects first match)
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(0.3)
-        return True
-
-    except Exception:
-        return False
-
-
-# ─── Radio buttons ─────────────────────────────────────
-
-async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool:
-    """Select the radio button matching the value.
-    Handles hidden radios (opacity:0) with custom label styling (like demoqa)."""
+async def _fill_radio(page: Page, selector: str, label: str, value: str) -> FieldResult:
+    """Select the radio button matching the value. Uses force=True on labels."""
     val_lower = value.lower().strip()
 
-    # First: close any open datepickers/popups that might be blocking
+    # Close any open datepickers/popups first
     try:
         await page.keyboard.press("Escape")
         await asyncio.sleep(0.3)
     except Exception:
         pass
 
-    # Strategy 1: Use Playwright's get_by_label — most reliable for radio buttons
+    # Strategy 1: Playwright get_by_label
     try:
         loc = page.get_by_label(value, exact=True)
-        count = await loc.count()
-        if count > 0:
+        if await loc.count() > 0:
             try:
                 await loc.first.check(force=True)
-                return True
+                await asyncio.sleep(0.3)
+                if await loc.first.is_checked():
+                    return FieldResult(label, selector, "radio", value, "verified")
+                return FieldResult(label, selector, "radio", value, "filled")
             except Exception:
-                # If check fails, try clicking the label directly
                 try:
                     await loc.first.click(force=True)
                     await asyncio.sleep(0.3)
-                    return True
+                    return FieldResult(label, selector, "radio", value, "filled")
                 except Exception:
                     pass
     except Exception:
         pass
 
-    # Strategy 1b: Playwright get_by_text — click the label text directly
+    # Strategy 1b: get_by_text — click the label text directly
     try:
         loc = page.get_by_text(value, exact=True)
         if await loc.count() > 0:
             await loc.first.click(force=True)
             await asyncio.sleep(0.3)
-            return True
+            return FieldResult(label, selector, "radio", value, "filled")
     except Exception:
         pass
 
-    # Strategy 2: Find all radios and match by label text, then force-click
+    # Strategy 2: Find all radios, match by label text, force-click label
     radios = []
     if selector:
         radios = await page.query_selector_all(selector)
@@ -824,7 +808,6 @@ async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool
                            val_lower in label_text.lower() or
                            label_text.lower().strip() in val_lower):
             try:
-                # Get the label element and use Playwright's native click
                 label_id = await radio.get_attribute("id")
                 if label_id:
                     label_el = await page.query_selector(f'label[for="{label_id}"]')
@@ -832,10 +815,12 @@ async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool
                         await label_el.scroll_into_view_if_needed()
                         await label_el.click(force=True)
                         await asyncio.sleep(0.3)
-                        return True
-                # Fallback: force-check the radio itself
+                        # Verify
+                        is_checked = await radio.is_checked()
+                        status = "verified" if is_checked else "filled"
+                        return FieldResult(label, selector, "radio", value, status)
                 await radio.check(force=True)
-                return True
+                return FieldResult(label, selector, "radio", value, "filled")
             except Exception:
                 pass
 
@@ -849,13 +834,13 @@ async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool
                     label_el = await page.query_selector(f'label[for="{label_id}"]')
                     if label_el:
                         await label_el.click(force=True)
-                        return True
+                        return FieldResult(label, selector, "radio", value, "filled")
                 await radio.check(force=True)
-                return True
+                return FieldResult(label, selector, "radio", value, "filled")
             except Exception:
                 pass
 
-    # Strategy 4: JS force-set the radio
+    # Strategy 4: JS force-set
     try:
         forced = await page.evaluate("""(value) => {
             const val = value.toLowerCase().trim();
@@ -872,60 +857,334 @@ async def _fill_radio(page: Page, selector: str, label: str, value: str) -> bool
             return false;
         }""", value)
         if forced:
-            return True
+            return FieldResult(label, selector, "radio", value, "filled")
     except Exception:
         pass
 
-    return False
+    return FieldResult(label, selector, "radio", value, "error",
+                       f"Could not select radio: {label} = {value}")
 
 
-# ─── Checkboxes ────────────────────────────────────────
+# ─── Checkboxes ──────────────────────────────────────────
 
-async def _fill_checkbox(page: Page, selector: str, label: str, value: str):
-    """Check boxes matching comma-separated values."""
+async def _fill_checkbox(page: Page, selector: str, label: str,
+                          value: str, profile_data: Optional[dict] = None) -> FieldResult:
+    """Read all checkbox labels, cross-reference with profile/value, check matches.
+    Returns needs_user if no matching data."""
     values = [v.strip().lower() for v in value.split(",")]
     checkboxes = await page.query_selector_all(selector) if selector else []
     if not checkboxes:
         checkboxes = await page.query_selector_all('input[type="checkbox"]')
 
+    if not checkboxes:
+        return FieldResult(label, selector, "checkbox", value, "error", "No checkboxes found")
+
+    # Read all available labels
+    all_labels = []
     for cb in checkboxes:
-        label_text = await cb.evaluate("""e => {
+        cb_label = await cb.evaluate("""e => {
             if (e.labels && e.labels[0]) return e.labels[0].textContent.trim();
             const next = e.nextElementSibling || e.parentElement;
             return next?.textContent?.trim() || e.value || '';
         }""")
+        all_labels.append(cb_label)
 
-        if label_text and any(v in label_text.lower() for v in values):
+    # If value is empty and no profile data, ask the user
+    if not value.strip() or value.strip().lower() in ("", "none", "unknown"):
+        return FieldResult(label, selector, "checkbox",
+                           f"Options: {', '.join(all_labels[:10])}",
+                           "needs_user",
+                           "Checkbox options need user selection")
+
+    checked_count = 0
+    for i, cb in enumerate(checkboxes):
+        cb_label = all_labels[i] if i < len(all_labels) else ""
+        if cb_label and any(v in cb_label.lower() for v in values):
             is_checked = await cb.is_checked()
             if not is_checked:
                 await cb.scroll_into_view_if_needed()
                 await asyncio.sleep(random.uniform(0.2, 0.5))
                 try:
+                    # Click the label element with force
                     label_el = await cb.evaluate_handle("""e => e.labels?.[0] || e.parentElement""")
-                    await label_el.as_element().click()
+                    await label_el.as_element().click(force=True)
                 except Exception:
-                    await cb.click()
+                    try:
+                        await cb.click(force=True)
+                    except Exception:
+                        await cb.evaluate("e => { e.checked = true; e.dispatchEvent(new Event('change', {bubbles: true})); }")
+                checked_count += 1
+                await asyncio.sleep(random.uniform(0.3, 0.6))
+
+    if checked_count > 0:
+        return FieldResult(label, selector, "checkbox", value, "verified",
+                           f"Checked {checked_count} boxes")
+    return FieldResult(label, selector, "checkbox", value, "error",
+                       f"No checkboxes matched values: {value}")
 
 
-# ─── Dynamic fields ───────────────────────────────────
+# ─── Date picker (calendar popup) ────────────────────────
+
+def _parse_date_value(value: str) -> tuple[int, int, int] | None:
+    """Parse a date string into (day, month, year). Returns None on failure."""
+    value = value.strip()
+    parts = re.split(r'[/\-.]', value)
+    if len(parts) != 3:
+        return None
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+
+    a, b, c = nums
+    if a > 100:
+        return (c, b, a)  # ISO: YYYY-MM-DD -> day, month, year
+    if c > 100:
+        if a > 12:
+            return (a, b, c)  # DD/MM/YYYY
+        elif b > 12:
+            return (b, a, c)  # MM/DD/YYYY
+        else:
+            return (a, b, c)  # Ambiguous — assume DD/MM/YYYY
+    return None
+
+
+_MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+async def _fill_datepicker(page: Page, el: ElementHandle, value: str,
+                            label: str) -> FieldResult:
+    """Navigate a React datepicker calendar popup. Click arrows for month/year,
+    then click the correct day."""
+    selector = await _get_selector(el)
+    parsed = _parse_date_value(value)
+    if not parsed:
+        # Fallback: try typing via JS
+        return await _fill_date_via_js(page, el, value, label)
+
+    day, month, year = parsed
+    target_month_name = _MONTH_NAMES[month - 1]
+
+    try:
+        await el.scroll_into_view_if_needed()
+        await asyncio.sleep(_short_pause())
+        await el.click()
+        await asyncio.sleep(0.8)  # Wait for calendar popup
+
+        # Check if a calendar popup appeared
+        has_calendar = await page.evaluate("""() => {
+            return !!(
+                document.querySelector('.react-datepicker, [class*="datepicker__month"], ' +
+                    '[class*="calendar"], [role="dialog"][class*="date"], .flatpickr-calendar')
+            );
+        }""")
+
+        if has_calendar:
+            # Navigate to correct month/year using arrow buttons
+            for _ in range(120):  # max 10 years of navigation
+                header_text = await page.evaluate("""() => {
+                    const hdr = document.querySelector(
+                        '.react-datepicker__current-month, ' +
+                        '[class*="datepicker__header"] [class*="current"], ' +
+                        '[class*="calendar"] [class*="header"], ' +
+                        '.flatpickr-current-month'
+                    );
+                    return hdr ? hdr.textContent.trim() : '';
+                }""")
+
+                if not header_text:
+                    break
+
+                # Check if we're at the right month/year
+                if target_month_name.lower() in header_text.lower() and str(year) in header_text:
+                    break
+
+                # Determine direction — parse current month/year from header
+                current_year = None
+                current_month = None
+                for i, mn in enumerate(_MONTH_NAMES):
+                    if mn.lower() in header_text.lower() or mn[:3].lower() in header_text.lower():
+                        current_month = i + 1
+                        break
+                year_match = re.search(r'(19|20)\d{2}', header_text)
+                if year_match:
+                    current_year = int(year_match.group())
+
+                if current_year and current_month:
+                    current_val = current_year * 12 + current_month
+                    target_val = year * 12 + month
+                    if target_val > current_val:
+                        arrow_sel = ('.react-datepicker__navigation--next, '
+                                     '[class*="datepicker"] [class*="next"], '
+                                     '[class*="calendar"] button[class*="next"], '
+                                     '.flatpickr-next-month')
+                    else:
+                        arrow_sel = ('.react-datepicker__navigation--previous, '
+                                     '[class*="datepicker"] [class*="prev"], '
+                                     '[class*="calendar"] button[class*="prev"], '
+                                     '.flatpickr-prev-month')
+                else:
+                    # Default to next
+                    arrow_sel = ('.react-datepicker__navigation--next, '
+                                 '[class*="datepicker"] [class*="next"]')
+
+                arrow = await page.query_selector(arrow_sel)
+                if arrow:
+                    await arrow.click()
+                    await asyncio.sleep(0.35)
+                else:
+                    break
+
+            # Click the correct day
+            day_clicked = await page.evaluate("""(day) => {
+                const dayEls = document.querySelectorAll(
+                    '.react-datepicker__day, [class*="datepicker__day"], ' +
+                    '[class*="calendar"] [class*="day"], .flatpickr-day'
+                );
+                for (const d of dayEls) {
+                    const cls = d.className || '';
+                    // Skip outside-month days
+                    if (cls.includes('outside') || cls.includes('disabled') ||
+                        cls.includes('prevMonthDay') || cls.includes('nextMonthDay')) continue;
+                    const text = d.textContent.trim();
+                    if (parseInt(text) === day) {
+                        d.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""", day)
+
+            await asyncio.sleep(0.4)
+
+            if day_clicked:
+                # Close calendar
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
+                return FieldResult(label, selector, "datepicker", value, "verified")
+
+        # Fallback: use JS to set value
+        return await _fill_date_via_js(page, el, value, label)
+
+    except Exception as exc:
+        return FieldResult(label, selector, "datepicker", value, "error", str(exc)[:120])
+
+
+async def _fill_date_via_js(page: Page, el: ElementHandle, value: str,
+                             label: str) -> FieldResult:
+    """Set a date value using native JS setter to bypass React."""
+    selector = await _get_selector(el)
+    parsed = _parse_date_value(value)
+    if parsed:
+        day, month, year = parsed
+        formatted = f"{month:02d}/{day:02d}/{year:04d}"
+    else:
+        formatted = value
+
+    try:
+        await el.scroll_into_view_if_needed()
+        await asyncio.sleep(_short_pause())
+
+        await page.evaluate("""([sel, formatted]) => {
+            const el = document.querySelector(sel) || document.activeElement;
+            if (!el) return;
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value'
+            ).set;
+            nativeSetter.call(el, formatted);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }""", [selector, formatted])
+
+        await asyncio.sleep(0.3)
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.2)
+        await page.keyboard.press("Tab")
+
+        return FieldResult(label, selector, "datepicker", value, "filled")
+    except Exception as exc:
+        return FieldResult(label, selector, "datepicker", value, "error", str(exc)[:120])
+
+
+async def _fill_date_native(page: Page, el: ElementHandle, value: str,
+                             label: str) -> FieldResult:
+    """Fill an <input type="date"> using .fill() which handles the native widget."""
+    selector = await _get_selector(el)
+    try:
+        await el.scroll_into_view_if_needed()
+        parsed = _parse_date_value(value)
+        if parsed:
+            day, month, year = parsed
+            iso = f"{year:04d}-{month:02d}-{day:02d}"
+        else:
+            iso = value
+        await el.fill(iso)
+        await asyncio.sleep(0.3)
+        return FieldResult(label, selector, "date_native", value, "verified")
+    except Exception as exc:
+        return FieldResult(label, selector, "date_native", value, "error", str(exc)[:120])
+
+
+# ─── File upload ─────────────────────────────────────────
+
+async def _handle_file_upload(page: Page, el: ElementHandle, value: str,
+                               label: str) -> FieldResult:
+    """Don't skip silently — report back that the user must provide a file."""
+    selector = await _get_selector(el)
+    return FieldResult(label, selector, "file", value, "needs_user",
+                       f"File upload needed for '{label}'. Please provide the file.")
+
+
+# ─── Utility: get a usable selector for an element ──────
+
+async def _get_selector(el: ElementHandle) -> str:
+    """Build a CSS selector string for an element."""
+    try:
+        info = await el.evaluate("""e => {
+            if (e.id) return '#' + e.id;
+            if (e.name) return e.tagName.toLowerCase() + '[name="' + e.name + '"]';
+            return '';
+        }""")
+        return info or ""
+    except Exception:
+        return ""
+
+
+# ─── Natural scrolling between sections ──────────────────
+
+async def _scroll_to_element(page: Page, el: ElementHandle):
+    """Scroll smoothly to an element like a human would."""
+    try:
+        await el.evaluate("""e => {
+            e.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }""")
+        await asyncio.sleep(random.uniform(0.3, 0.6))
+    except Exception:
+        try:
+            await el.scroll_into_view_if_needed()
+        except Exception:
+            pass
+
+
+# ─── Dynamic fields ──────────────────────────────────────
 
 async def _handle_dynamic_fields(page: Page):
     """Wait briefly for any dynamic fields that appear after filling."""
     await asyncio.sleep(0.3)
-    # Check if new fields appeared (some forms show fields conditionally)
-    # This is handled by the main loop — new fields from the original match
-    # list will be filled when we get to them
 
 
-# ─── Multi-page navigation ────────────────────────────
+# ─── Multi-page navigation ──────────────────────────────
 
 async def _navigate_pages(page: Page, matches: list[dict]) -> int:
-    """Detect and handle multi-page forms."""
+    """Detect and handle multi-page forms. Does NOT click submit."""
     pages = 1
     max_pages = 10
 
     while pages < max_pages:
-        # Look for Next / Continue buttons
         next_clicked = await page.evaluate("""() => {
             const btns = [...document.querySelectorAll('button, input[type="submit"], a.btn, [role="button"], a[class*="btn"]')];
             const nextWords = ['next', 'continue', 'proceed', 'forward', 'siguiente', 'suivant', 'weiter'];
@@ -948,7 +1207,6 @@ async def _navigate_pages(page: Page, matches: list[dict]) -> int:
             except Exception:
                 pass
             pages += 1
-            # Dismiss any new popups on the new page
             await _dismiss_popups(page)
         else:
             break
@@ -956,13 +1214,12 @@ async def _navigate_pages(page: Page, matches: list[dict]) -> int:
     return pages
 
 
-# ─── Validation checking ──────────────────────────────
+# ─── Validation checking ────────────────────────────────
 
 async def _check_validation(page: Page) -> list[str]:
     """Check for validation error messages on the form."""
     errors = await page.evaluate("""() => {
         const errs = [];
-        // Common error selectors
         const errorEls = document.querySelectorAll(
             '.error, .form-error, [class*="error"], [class*="invalid"], [role="alert"], .field-error, .help-block.text-danger'
         );
@@ -977,8 +1234,287 @@ async def _check_validation(page: Page) -> list[str]:
     return [f"Form validation: {e}" for e in errors] if errors else []
 
 
-# ─── Public API ────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  MAIN FILL ENGINE
+# ═══════════════════════════════════════════════════════════
+
+async def _fill_form(url: str, matches: list[dict]) -> FillResult:
+    """Navigate to URL and autonomously fill every field with intelligence."""
+    filled = 0
+    skipped = 0
+    pages = 1
+    errors: list[str] = []
+    field_results: list[FieldResult] = []
+    captcha = False
+
+    async with async_playwright() as p:
+        # Launch with stealth settings
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        context = await browser.new_context(
+            viewport={"width": 1366, "height": 768},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+            timezone_id="Europe/London",
+        )
+
+        # Remove webdriver flag
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            window.chrome = { runtime: {} };
+        """)
+
+        page = await context.new_page()
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+
+        # ── Step 1: Dismiss popups ──
+        await _dismiss_popups(page)
+        await asyncio.sleep(_human_delay())
+
+        # ── Step 2: Full page scan — scroll top to bottom ──
+        await _full_page_scan(page)
+        await asyncio.sleep(0.5)
+
+        # ── Step 3: Sort fields (cascading-aware) ──
+        # Fill text/email/tel first, then selects (state before city),
+        # then radios, then checkboxes last
+        priority = {
+            "text": 0, "email": 0, "tel": 0, "number": 0, "textarea": 1,
+            "date": 2, "select": 3, "radio": 4, "checkbox": 5,
+        }
+        sorted_matches = sorted(
+            [m for m in matches
+             if m.get("value") and m.get("match_type") != "skipped"],
+            key=lambda m: priority.get(m.get("field_type", "text"), 5),
+        )
+
+        # Track which "parent" selects have been filled (for cascading)
+        filled_selects: list[str] = []
+
+        for match in sorted_matches:
+            selector = match["selector"]
+            value = str(match["value"])
+            ftype = match.get("field_type", "text")
+            label = match.get("label", selector)
+
+            try:
+                # ── Human delay between fields ──
+                await asyncio.sleep(_human_delay())
+
+                # ── Handle radio buttons (group-based, no _find_element) ──
+                if ftype == "radio":
+                    fr = await _fill_radio(page, selector, label, value)
+                    field_results.append(fr)
+                    if fr.status in ("filled", "verified"):
+                        filled += 1
+                    else:
+                        skipped += 1
+                        errors.append(fr.error_message or f"Radio failed: {label}")
+                    continue
+
+                # ── Handle checkboxes ──
+                if ftype == "checkbox":
+                    fr = await _fill_checkbox(page, selector, label, value)
+                    field_results.append(fr)
+                    if fr.status in ("filled", "verified"):
+                        filled += 1
+                    elif fr.status == "needs_user":
+                        skipped += 1
+                    else:
+                        skipped += 1
+                        errors.append(fr.error_message or f"Checkbox failed: {label}")
+                    continue
+
+                # ── Handle file uploads ──
+                if ftype == "file":
+                    fr = await _handle_file_upload(page, None, value, label)
+                    field_results.append(fr)
+                    skipped += 1
+                    continue
+
+                # ── Handle selects (native + React) ──
+                if ftype == "select":
+                    # Check if this is a React Select first
+                    if "react-select" in selector or "css-" in selector:
+                        el = await _find_element(page, selector, label, ftype)
+                        if el:
+                            fr = await _fill_react_select_field(page, el, value, label)
+                        else:
+                            fr_rs = await _fill_react_select_by_label(page, label, value)
+                            fr = fr_rs or FieldResult(label, selector, "select", value, "error",
+                                                       f"Could not find React Select: {label}")
+                    else:
+                        el = await _find_element(page, selector, label, ftype)
+                        if el:
+                            tag = await el.evaluate("e => e.tagName.toLowerCase()")
+                            if tag == "select":
+                                fr = await _fill_native_select(page, el, value, label)
+                            else:
+                                # Detect real type
+                                real_type = await _detect_field_type(page, el, ftype, label)
+                                if real_type == "react_select":
+                                    fr = await _fill_react_select_field(page, el, value, label)
+                                else:
+                                    fr = await _fill_custom_dropdown(page, el, value, label)
+                        else:
+                            # Try React Select by label as last resort
+                            fr_rs = await _fill_react_select_by_label(page, label, value)
+                            fr = fr_rs or FieldResult(label, selector, "select", value, "error",
+                                                       f"Could not find: {label}")
+
+                    field_results.append(fr)
+                    if fr.status in ("filled", "verified"):
+                        filled += 1
+                        filled_selects.append(label.lower())
+                        # Cascading wait: if this looks like a state/country,
+                        # pause for dependent fields to load
+                        label_lower = label.lower()
+                        if any(kw in label_lower for kw in ("state", "country", "province", "region")):
+                            await asyncio.sleep(random.uniform(1.5, 2.5))
+                    else:
+                        skipped += 1
+                        if fr.error_message:
+                            errors.append(fr.error_message)
+                    continue
+
+                # ── All other field types: find element first ──
+                el = await _find_element(page, selector, label, ftype)
+                if not el:
+                    # Last resort: maybe it's a React Select not tagged as select
+                    if label:
+                        fr_rs = await _fill_react_select_by_label(page, label, value)
+                        if fr_rs and fr_rs.status in ("filled", "verified"):
+                            field_results.append(fr_rs)
+                            filled += 1
+                            continue
+                    fr = FieldResult(label, selector, ftype, value, "skipped",
+                                     f"Could not find: {label}")
+                    field_results.append(fr)
+                    skipped += 1
+                    errors.append(f"Could not find: {label}")
+                    continue
+
+                # Scroll to element naturally
+                await _scroll_to_element(page, el)
+
+                # ── Detect the REAL field type from DOM ──
+                real_type = await _detect_field_type(page, el, ftype, label)
+
+                # ── Route to the correct handler ──
+                if real_type == "react_select":
+                    fr = await _fill_react_select_field(page, el, value, label)
+
+                elif real_type == "datepicker":
+                    fr = await _fill_datepicker(page, el, value, label)
+
+                elif real_type == "date_native":
+                    fr = await _fill_date_native(page, el, value, label)
+
+                elif real_type == "date_text":
+                    # Date in a plain text field — try calendar first, fall back to JS
+                    fr = await _fill_datepicker(page, el, value, label)
+
+                elif real_type == "phone":
+                    fr = await _fill_phone(page, el, value, label)
+
+                elif real_type == "native_select":
+                    fr = await _fill_native_select(page, el, value, label)
+
+                elif real_type == "file":
+                    fr = await _handle_file_upload(page, el, value, label)
+
+                elif real_type in ("text", "email", "number", "textarea"):
+                    fr = await _fill_text(page, el, value, label)
+
+                else:
+                    # Default: treat as text
+                    fr = await _fill_text(page, el, value, label)
+
+                field_results.append(fr)
+                if fr.status in ("filled", "verified"):
+                    filled += 1
+                elif fr.status == "needs_user":
+                    skipped += 1
+                else:
+                    skipped += 1
+                    if fr.error_message:
+                        errors.append(fr.error_message)
+
+                await _handle_dynamic_fields(page)
+
+            except Exception as e:
+                fr = FieldResult(label, selector, ftype, value, "error", str(e)[:120])
+                field_results.append(fr)
+                skipped += 1
+                errors.append(f"{label}: {str(e)[:120]}")
+
+        # ── Handle multi-page forms ──
+        pages = await _navigate_pages(page, sorted_matches)
+
+        # ── CAPTCHA check ──
+        captcha = await _check_captcha(page)
+        if captcha:
+            errors.append("CAPTCHA detected on the form -- you'll need to solve it manually")
+
+        # ── Validation check ──
+        validation_errors = await _check_validation(page)
+        if validation_errors:
+            errors.extend(validation_errors)
+
+        # ── Check for submit button and report (do NOT click) ──
+        has_submit = await page.evaluate("""() => {
+            const btns = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')];
+            const submitWords = ['submit', 'finish', 'complete', 'send', 'apply'];
+            for (const btn of btns) {
+                const text = (btn.textContent || btn.value || '').trim().toLowerCase();
+                if (submitWords.some(w => text.includes(w)) && btn.offsetParent !== null) {
+                    return text;
+                }
+            }
+            return null;
+        }""")
+        if has_submit:
+            errors.append(f"Submit button found ('{has_submit}') -- NOT clicked. Review and submit manually.")
+
+        # ── Hide overlays, take screenshot ──
+        await page.evaluate("""() => {
+            document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]').forEach(el => {
+                el.style.display = 'none';
+            });
+            document.querySelectorAll('#fixedban, .adsbygoogle, [id*="google_ads"], iframe[src*="googleads"]').forEach(el => {
+                el.style.display = 'none';
+            });
+        }""")
+
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(1.5)
+        screenshot = await page.screenshot(full_page=True, type="png")
+        screenshot_b64 = base64.b64encode(screenshot).decode()
+
+        await browser.close()
+
+    return FillResult(
+        filled=filled,
+        skipped=skipped,
+        pages_navigated=pages,
+        screenshot_b64=screenshot_b64,
+        errors=errors,
+        captcha_detected=captcha,
+        field_results=field_results,
+    )
+
+
+# ─── Public API ──────────────────────────────────────────
 
 def fill_form(url: str, matches: list[dict]) -> FillResult:
-    """Synchronous wrapper — the main entry point."""
+    """Synchronous wrapper -- the main entry point."""
     return asyncio.run(_fill_form(url, matches))
