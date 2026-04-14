@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from .form_reader import FormField
 from .groq_client import chat
@@ -72,6 +74,108 @@ class FieldMatch:
     note: str = ""
 
 
+# Country codes by nationality (lowercase key)
+_COUNTRY_CODES = {
+    "gambian": "220",
+    "gambia": "220",
+    "the gambia": "220",
+    "senegalese": "221",
+    "senegal": "221",
+    "nigerian": "234",
+    "nigeria": "234",
+    "ghanaian": "233",
+    "ghana": "233",
+    "kenyan": "254",
+    "kenya": "254",
+    "south african": "27",
+    "south africa": "27",
+    "american": "1",
+    "usa": "1",
+    "british": "44",
+    "uk": "44",
+    "indian": "91",
+    "india": "91",
+}
+
+# Common date formats to try when parsing profile dates
+_DATE_FORMATS = [
+    "%d/%m/%Y",   # 14/10/2002
+    "%m/%d/%Y",   # 10/14/2002
+    "%Y-%m-%d",   # 2002-10-14
+    "%d-%m-%Y",   # 14-10-2002
+    "%d %B %Y",   # 14 October 2002
+    "%d %b %Y",   # 14 Oct 2002
+    "%B %d, %Y",  # October 14, 2002
+    "%b %d, %Y",  # Oct 14, 2002
+]
+
+
+def _fix_phone_for_digit_requirement(value: str, label: str, profile: dict) -> str:
+    """If the label requires N digits and the phone is too short, prepend country code."""
+    if not value or not isinstance(value, str):
+        return value
+
+    # Extract digit requirement from label (e.g. "10 Digits", "10 digits", "10-digit")
+    digit_match = re.search(r"(\d{1,2})\s*(?:digits?|Digits?)", label)
+    if not digit_match:
+        return value
+
+    required_digits = int(digit_match.group(1))
+    digits_only = re.sub(r"\D", "", value)
+
+    if len(digits_only) >= required_digits:
+        return digits_only[:required_digits]
+
+    # Phone is shorter than required — try prepending country code
+    nationality = (profile.get("nationality") or profile.get("country") or "").strip().lower()
+    country_code = _COUNTRY_CODES.get(nationality, "220")  # default Gambian
+
+    padded = country_code + digits_only
+    if len(padded) >= required_digits:
+        return padded[:required_digits]
+
+    # Still too short — return what we have (digits only)
+    return digits_only
+
+
+def _normalize_date(value: str) -> str:
+    """Convert a date string to YYYY-MM-DD for reliable JS/datepicker input."""
+    if not value or not isinstance(value, str):
+        return value
+
+    # Already in ISO format
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", value.strip()):
+        return value.strip()
+
+    for fmt in _DATE_FORMATS:
+        try:
+            dt = datetime.strptime(value.strip(), fmt)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    # Couldn't parse — return original
+    return value
+
+
+def _is_phone_field(label: str, profile_key: str | None) -> bool:
+    """Check if a field is a phone/mobile number field."""
+    label_lower = (label or "").lower()
+    key_lower = (profile_key or "").lower()
+    phone_keywords = ("phone", "mobile", "tel", "cell", "contact number")
+    return any(kw in label_lower or kw in key_lower for kw in phone_keywords)
+
+
+def _is_date_field(label: str, profile_key: str | None, field_type: str) -> bool:
+    """Check if a field is a date field."""
+    if field_type == "date":
+        return True
+    label_lower = (label or "").lower()
+    key_lower = (profile_key or "").lower()
+    date_keywords = ("date", "dob", "birth", "birthday", "born")
+    return any(kw in label_lower or kw in key_lower for kw in date_keywords)
+
+
 def match_fields(fields: list[FormField], page_context: str = "") -> list[FieldMatch]:
     """Match form fields to profile data using LLM semantic understanding."""
     profile = db.get_full_profile()
@@ -123,12 +227,23 @@ Match each form field to the appropriate profile data. Return the JSON array."""
             if value.startswith("#") or value.startswith(".") or "input[" in value or "select-" in value or value.startswith("css-"):
                 value = None
 
+        label = m.get("label", "")
+        profile_key = m.get("profile_key")
+
+        # Smart phone number handling: pad with country code if digits required
+        if value and _is_phone_field(label, profile_key):
+            value = _fix_phone_for_digit_requirement(value, label, profile)
+
+        # Smart date handling: normalize to YYYY-MM-DD for JS datepickers
+        if value and _is_date_field(label, profile_key, field_type):
+            value = _normalize_date(value)
+
         # Skip file upload fields — agent can't handle these
         if field_type == "file":
             matches.append(FieldMatch(
                 selector=m["selector"],
                 field_type=field_type,
-                label=m.get("label", ""),
+                label=label,
                 match_type="skipped",
                 profile_key=None,
                 value=None,
@@ -140,9 +255,9 @@ Match each form field to the appropriate profile data. Return the JSON array."""
         matches.append(FieldMatch(
             selector=m["selector"],
             field_type=field_type,
-            label=m.get("label", ""),
+            label=label,
             match_type=m.get("match_type", "unknown") if value is not None or m.get("needs_essay") else "unknown",
-            profile_key=m.get("profile_key"),
+            profile_key=profile_key,
             value=value,
             confidence=float(m.get("confidence", 0)) if value else 0,
             needs_essay=bool(m.get("needs_essay", False)),
