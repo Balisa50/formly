@@ -136,14 +136,13 @@ export default function FillFormPage() {
         if (event.type === "ready") {
           const d = event.data;
           setFillMatches(d.fill_matches || []);
-          setGapQuestions(d.gap_questions || []);
           setEssayDrafts(d.essay_drafts || []);
           setPageContext(d.page_context || "");
+          setGapQuestions(d.gap_questions || []);
 
           if (d.gap_questions?.length > 0) {
             setPhase("asking");
           } else {
-            // No gaps — go straight to filling
             await doFill(url, d.fill_matches, {});
           }
         }
@@ -361,42 +360,68 @@ export default function FillFormPage() {
           {/* Gap questions — shown ONE at a time */}
           {phase === "asking" && gapIndex < gapQuestions.length && (
             <div className="border-t border-border p-3 space-y-3">
-              {/* Progress indicator */}
-              <p className="text-xs text-text-muted">
-                Question {gapIndex + 1} of {gapQuestions.length}
-              </p>
-
               {/* Current question */}
               <div className="bg-blue-500/10 rounded-lg px-4 py-3">
                 <p className="text-sm text-blue-400 font-medium">
-                  {gapQuestions[gapIndex].question || gapQuestions[gapIndex].label || `What is your ${gapQuestions[gapIndex].label}?`}
+                  {gapQuestions[gapIndex].question || `What is your ${gapQuestions[gapIndex].label}?`}
                 </p>
-                {gapQuestions[gapIndex].label && gapQuestions[gapIndex].question && (
-                  <p className="text-xs text-text-muted mt-1">Field: {gapQuestions[gapIndex].label}</p>
-                )}
               </div>
 
-              {/* Previously answered questions (compact) */}
-              {gapIndex > 0 && (
-                <div className="space-y-1">
-                  {gapQuestions.slice(0, gapIndex).map((q: any, i: number) => (
-                    <div key={i} className="flex items-center gap-2 text-xs text-text-muted">
-                      <svg className="w-3 h-3 text-green shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                      </svg>
-                      <span className="truncate">{q.label}: {gapAnswers[q.selector] || "answered"}</span>
-                    </div>
-                  ))}
+              {/* File upload portal for file-type questions */}
+              {gapQuestions[gapIndex].field_type?.includes("file") ? (
+                <div className="space-y-2">
+                  <label className="flex flex-col items-center justify-center w-full h-28 border-2 border-dashed border-white/20 rounded-xl cursor-pointer hover:border-accent/50 hover:bg-accent/5 transition-colors">
+                    <svg className="w-8 h-8 text-white/40 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                    </svg>
+                    <span className="text-sm text-white/50">Click to upload</span>
+                    <input type="file" className="hidden"
+                      accept={gapQuestions[gapIndex].field_type?.includes("photo") ? "image/*" : "*"}
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        addLog({ type: "progress", message: `Uploaded: ${file.name}` });
+                        // Upload to profile
+                        try {
+                          const formData = new FormData();
+                          formData.append("file", file);
+                          const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+                          await fetch(`${BASE}/api/profile/photo`, { method: "POST", body: formData });
+                        } catch {}
+                        // Move to next question
+                        const newAnswers = { ...gapAnswers, [gapQuestions[gapIndex].selector]: file.name };
+                        setGapAnswers(newAnswers);
+                        const nextIdx = gapIndex + 1;
+                        setGapIndex(nextIdx);
+                        if (nextIdx >= gapQuestions.length) {
+                          addLog({ type: "progress", message: "All questions answered. Filling the form now..." });
+                          await doFill(agentUrl, [...fillMatches], newAnswers);
+                        }
+                      }}
+                    />
+                  </label>
+                  <button onClick={() => {
+                    // Skip this file upload
+                    const nextIdx = gapIndex + 1;
+                    setGapIndex(nextIdx);
+                    addLog({ type: "progress", message: `Skipped ${gapQuestions[gapIndex].label} — you can add it later.` });
+                    if (nextIdx >= gapQuestions.length) {
+                      addLog({ type: "progress", message: "Filling the form now..." });
+                      doFill(agentUrl, [...fillMatches], gapAnswers);
+                    }
+                  }} className="text-xs text-white/40 hover:text-white/60">
+                    Skip this upload
+                  </button>
+                </div>
+              ) : (
+                /* Text input for normal questions */
+                <div className="flex gap-2">
+                  <input className="input flex-1" placeholder="Type your answer..." value={userInput}
+                    onChange={(e) => setUserInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleGapAnswer()} autoFocus />
+                  <button onClick={handleGapAnswer} className="bg-accent text-white text-sm px-4 py-2 rounded-lg">Send</button>
                 </div>
               )}
-
-              {/* Input */}
-              <div className="flex gap-2">
-                <input className="input flex-1" placeholder="Type your answer..." value={userInput}
-                  onChange={(e) => setUserInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleGapAnswer()} autoFocus />
-                <button onClick={handleGapAnswer} className="bg-accent text-white text-sm px-4 py-2 rounded-lg">Send</button>
-              </div>
               <button onClick={handleSkipAndFill} className="text-xs text-text-muted mt-2 hover:text-text-secondary">
                 Skip remaining questions and fill what you have
               </button>
