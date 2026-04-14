@@ -131,6 +131,8 @@ export default function FillFormPage() {
 
       // Process events one by one with delays for live feel
       for (const event of events) {
+        // Skip duplicate/noisy asking events from the log
+        if (event.type === "asking") continue;
         addLog({ type: event.type, message: event.message, data: event.data });
 
         if (event.type === "ready") {
@@ -138,7 +140,17 @@ export default function FillFormPage() {
           setFillMatches(d.fill_matches || []);
           setEssayDrafts(d.essay_drafts || []);
           setPageContext(d.page_context || "");
-          setGapQuestions(d.gap_questions || []);
+          // Deduplicate gap questions by label similarity
+          const rawQuestions = d.gap_questions || [];
+          const deduped: any[] = [];
+          const seenLabels = new Set<string>();
+          for (const q of rawQuestions) {
+            const key = (q.label || q.question || "").toLowerCase().replace(/[^a-z]/g, "");
+            if (seenLabels.has(key)) continue;
+            seenLabels.add(key);
+            deduped.push(q);
+          }
+          setGapQuestions(deduped);
 
           if (d.gap_questions?.length > 0) {
             setPhase("asking");
@@ -377,25 +389,23 @@ export default function FillFormPage() {
                     <span className="text-sm text-white/50">Click to upload</span>
                     <input type="file" className="hidden"
                       accept={gapQuestions[gapIndex].field_type?.includes("photo") ? "image/*" : "*"}
-                      onChange={async (e) => {
+                      onChange={(e) => {
                         const file = e.target.files?.[0];
                         if (!file) return;
                         addLog({ type: "progress", message: `Uploaded: ${file.name}` });
-                        // Upload to profile
-                        try {
-                          const formData = new FormData();
-                          formData.append("file", file);
-                          const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-                          await fetch(`${BASE}/api/profile/photo`, { method: "POST", body: formData });
-                        } catch {}
-                        // Move to next question
+                        // Upload to profile in background — don't block
+                        const formData = new FormData();
+                        formData.append("file", file);
+                        const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+                        fetch(`${BASE}/api/profile/photo`, { method: "POST", body: formData }).catch(() => {});
+                        // Move to next question INSTANTLY
                         const newAnswers = { ...gapAnswers, [gapQuestions[gapIndex].selector]: file.name };
                         setGapAnswers(newAnswers);
                         const nextIdx = gapIndex + 1;
                         setGapIndex(nextIdx);
                         if (nextIdx >= gapQuestions.length) {
                           addLog({ type: "progress", message: "All questions answered. Filling the form now..." });
-                          await doFill(agentUrl, [...fillMatches], newAnswers);
+                          doFill(agentUrl, [...fillMatches], newAnswers);
                         }
                       }}
                     />
