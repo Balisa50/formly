@@ -111,7 +111,11 @@ _DATE_FORMATS = [
 
 
 def _fix_phone_for_digit_requirement(value: str, label: str, profile: dict) -> str:
-    """If the label requires N digits and the phone is too short, prepend country code."""
+    """If the label requires N digits, ensure the phone has exactly that many.
+
+    When too short, zero-pad on the left instead of prepending country code.
+    Fields that explicitly state a digit count (e.g. "10 Digits") expect a
+    local number of that length, NOT an international format."""
     if not value or not isinstance(value, str):
         return value
 
@@ -124,18 +128,11 @@ def _fix_phone_for_digit_requirement(value: str, label: str, profile: dict) -> s
     digits_only = re.sub(r"\D", "", value)
 
     if len(digits_only) >= required_digits:
-        return digits_only[:required_digits]
+        # Too many digits — keep the rightmost N (strips country code prefix)
+        return digits_only[-required_digits:]
 
-    # Phone is shorter than required — try prepending country code
-    nationality = (profile.get("nationality") or profile.get("country") or "").strip().lower()
-    country_code = _COUNTRY_CODES.get(nationality, "220")  # default Gambian
-
-    padded = country_code + digits_only
-    if len(padded) >= required_digits:
-        return padded[:required_digits]
-
-    # Still too short — return what we have (digits only)
-    return digits_only
+    # Phone is shorter than required — zero-pad on the left
+    return digits_only.zfill(required_digits)
 
 
 def _normalize_date(value: str) -> str:
