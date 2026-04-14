@@ -487,10 +487,9 @@ async def _fill_text(page: Page, el: ElementHandle, value: str, label: str) -> F
         for char in value:
             await page.keyboard.type(char, delay=_typing_delay())
 
-        # Dismiss any dropdowns
-        await page.keyboard.press("Escape")
+        # Click body to blur (safer than Tab which can reach Submit button)
         await asyncio.sleep(0.2)
-        await page.keyboard.press("Tab")
+        await page.click("body", position={"x": 5, "y": 5}, no_wait_after=True)
         await asyncio.sleep(0.3)
 
         # Verify
@@ -664,7 +663,9 @@ async def _fill_custom_dropdown(page: Page, el: ElementHandle, value: str,
 
 async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
                                     label: str) -> FieldResult:
-    """Type first chars slowly, WAIT for suggestions, CLICK the match."""
+    """Type chars slowly, WAIT for suggestions, CLICK the match.
+    NEVER presses Enter (that can submit the form).
+    If no exact match, tries partial words, then picks first visible option."""
     selector = await _get_selector(el)
     try:
         await el.scroll_into_view_if_needed()
@@ -674,47 +675,106 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
         await el.click()
         await asyncio.sleep(0.5)
 
-        # Type first few characters slowly to trigger search
-        search_text = value[:20]
-        for char in search_text:
-            await page.keyboard.type(char, delay=_typing_delay())
+        # Try multiple search strategies
+        search_attempts = [value]
+        # Add individual words as fallbacks (e.g. "AI/ML ENGINEERING" → "Engineering")
+        words = re.split(r'[/,\s]+', value)
+        for w in words:
+            if w.strip() and w.strip().lower() != value.lower() and len(w.strip()) > 2:
+                search_attempts.append(w.strip())
 
-        # WAIT for suggestions dropdown to appear (at least 1 second)
-        await asyncio.sleep(1.2)
+        option_clicked = False
+        clicked_text = ""
 
-        # Find and click the matching option
-        option_clicked = await page.evaluate("""(val) => {
-            const options = document.querySelectorAll(
-                '[class*="option"]:not([class*="disabled"]), ' +
-                '[class*="menu"] [class*="option"], ' +
-                '[role="option"], [class*="suggestion"], ' +
-                '[class*="__option"], [class*="-option"]'
-            );
-            const valLower = val.toLowerCase();
-            let best = null;
-            let bestScore = Infinity;
-            for (const opt of options) {
-                if (opt.offsetParent === null) continue;
-                const text = opt.textContent.trim().toLowerCase();
-                if (text === valLower) { best = opt; bestScore = 0; break; }
-                if (text.includes(valLower) || valLower.includes(text)) {
-                    const score = Math.abs(text.length - valLower.length);
-                    if (score < bestScore) { best = opt; bestScore = score; }
+        for attempt_val in search_attempts:
+            # Clear previous input
+            await page.keyboard.press("Control+a")
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(0.2)
+
+            # Type first few characters slowly to trigger search
+            search_text = attempt_val[:20]
+            for char in search_text:
+                await page.keyboard.type(char, delay=_typing_delay())
+
+            # WAIT for suggestions dropdown to appear
+            await asyncio.sleep(1.5)
+
+            # Find and click the matching option
+            result = await page.evaluate("""(val) => {
+                const options = document.querySelectorAll(
+                    '[class*="option"]:not([class*="disabled"]), ' +
+                    '[class*="menu"] [class*="option"], ' +
+                    '[role="option"], [class*="suggestion"], ' +
+                    '[class*="__option"], [class*="-option"]'
+                );
+                const valLower = val.toLowerCase();
+                let best = null;
+                let bestScore = Infinity;
+                let bestText = '';
+                for (const opt of options) {
+                    if (opt.offsetParent === null) continue;
+                    const text = opt.textContent.trim().toLowerCase();
+                    // Skip "no options" messages
+                    if (text.includes('no option') || text.includes('not found')) continue;
+                    if (text === valLower) { best = opt; bestScore = 0; bestText = opt.textContent.trim(); break; }
+                    if (text.includes(valLower) || valLower.includes(text)) {
+                        const score = Math.abs(text.length - valLower.length);
+                        if (score < bestScore) { best = opt; bestScore = score; bestText = opt.textContent.trim(); }
+                    }
                 }
-            }
-            if (best) { best.click(); return true; }
-            return false;
-        }""", value)
+                if (best) { best.click(); return bestText; }
+                // If no match but options exist, click the FIRST visible option
+                for (const opt of options) {
+                    if (opt.offsetParent === null) continue;
+                    const text = opt.textContent.trim();
+                    if (text && !text.toLowerCase().includes('no option') && !text.toLowerCase().includes('not found')) {
+                        opt.click();
+                        return text;
+                    }
+                }
+                return '';
+            }""", attempt_val)
+
+            if result:
+                option_clicked = True
+                clicked_text = result
+                break
 
         if option_clicked:
             await asyncio.sleep(0.5)
-            # Verify a tag/token appeared or value is set
-            return FieldResult(label, selector, "react_select", value, "verified")
+            # Verify: check for selected value token or hidden input
+            has_value = await page.evaluate("""(sel) => {
+                // Check for multi-value tokens
+                const el = sel ? document.querySelector(sel) : null;
+                let container = el;
+                for (let i = 0; i < 8 && container; i++) {
+                    container = container?.parentElement;
+                    if (!container) break;
+                    const cls = (typeof container.className === 'string') ? container.className : '';
+                    if (cls.includes('__control') || cls.includes('react-select') || cls.includes('auto-complete')) {
+                        // Check for selected values
+                        const singleValue = container.parentElement?.querySelector('[class*="singleValue"], [class*="single-value"]');
+                        const multiValues = container.parentElement?.querySelectorAll('[class*="multiValue"], [class*="multi-value"]');
+                        if (singleValue && singleValue.textContent.trim()) return singleValue.textContent.trim();
+                        if (multiValues && multiValues.length > 0) {
+                            return [...multiValues].map(v => v.textContent.trim()).join(', ');
+                        }
+                        break;
+                    }
+                }
+                return '';
+            }""", selector)
 
-        # Fallback: press Enter to accept first match
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(0.4)
-        return FieldResult(label, selector, "react_select", value, "filled")
+            if has_value:
+                return FieldResult(label, selector, "react_select", clicked_text or value, "verified")
+            return FieldResult(label, selector, "react_select", clicked_text or value, "filled")
+
+        # NO option found at all — close dropdown, report error
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
+        return FieldResult(label, selector, "react_select", value, "error",
+                           f"No matching option found for '{label}' with value '{value}'")
 
     except Exception as exc:
         return FieldResult(label, selector, "react_select", value, "error", str(exc)[:120])
@@ -910,7 +970,26 @@ async def _fill_checkbox(page: Page, selector: str, label: str,
     checked_count = 0
     for i, cb in enumerate(checkboxes):
         cb_label = all_labels[i] if i < len(all_labels) else ""
-        if cb_label and any(v in cb_label.lower() for v in values):
+        cb_lower = cb_label.lower().strip()
+        # Match if any value word is in the checkbox label or vice versa
+        matched = False
+        for v in values:
+            v = v.strip()
+            if not v:
+                continue
+            if v in cb_lower or cb_lower in v:
+                matched = True
+                break
+            # Also match individual words (e.g. "sports" matches "Sports")
+            v_words = v.split()
+            for vw in v_words:
+                if len(vw) > 2 and vw in cb_lower:
+                    matched = True
+                    break
+            if matched:
+                break
+
+        if cb_label and matched:
             is_checked = await cb.is_checked()
             if not is_checked:
                 await cb.scroll_into_view_if_needed()
@@ -1348,6 +1427,33 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
         page = await context.new_page()
         await page.goto(url, wait_until="networkidle", timeout=30000)
 
+        # ── Step 0: PREVENT FORM SUBMISSION ──
+        # Intercept ALL form submit events so the agent never accidentally submits
+        await page.evaluate("""() => {
+            document.querySelectorAll('form').forEach(f => {
+                f.addEventListener('submit', e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                    return false;
+                }, true);
+            });
+            // Also override .submit() method on all forms
+            document.querySelectorAll('form').forEach(f => {
+                f.submit = () => {};
+            });
+            // Block Enter key from submitting forms
+            document.addEventListener('keydown', e => {
+                if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+                    const form = e.target.closest('form');
+                    if (form) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                }
+            }, true);
+        }""")
+
         # ── Step 1: Dismiss popups ──
         await _dismiss_popups(page)
         await asyncio.sleep(_human_delay())
@@ -1357,16 +1463,37 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
         await asyncio.sleep(0.5)
 
         # ── Step 3: Sort fields (cascading-aware) ──
-        # Fill text/email/tel first, then selects (state before city),
-        # then radios, then checkboxes last
-        priority = {
-            "text": 0, "email": 0, "tel": 0, "number": 0, "textarea": 1,
-            "date": 2, "select": 3, "radio": 4, "checkbox": 5,
-        }
+        # Fill text/email/tel first, then datepickers, then autocomplete/react select,
+        # then native selects (state before city), then radios, then checkboxes last
+        def _fill_priority(m: dict) -> int:
+            ft = m.get("field_type", "text")
+            label_lower = (m.get("label") or "").lower()
+            if ft in ("text", "email", "tel", "number", "textarea"):
+                return 0
+            if ft in ("date", "datepicker"):
+                return 1
+            if ft in ("autocomplete",):
+                # Subjects/skills autocomplete should come before state/city
+                if any(kw in label_lower for kw in ("subject", "skill", "hobby", "tag")):
+                    return 2
+                return 3  # State/city react selects
+            if ft in ("select",):
+                # State before city (cascading)
+                if any(kw in label_lower for kw in ("state", "country", "province")):
+                    return 4
+                if any(kw in label_lower for kw in ("city", "district")):
+                    return 5
+                return 4
+            if ft == "radio":
+                return 6
+            if ft == "checkbox":
+                return 7
+            return 8
+
         sorted_matches = sorted(
             [m for m in matches
              if m.get("value") and m.get("match_type") != "skipped"],
-            key=lambda m: priority.get(m.get("field_type", "text"), 5),
+            key=_fill_priority,
         )
 
         # Track which "parent" selects have been filled (for cascading)
@@ -1381,6 +1508,29 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
             try:
                 # ── Human delay between fields ──
                 await asyncio.sleep(_human_delay())
+
+                # ── Handle autocomplete / React Select fields ──
+                if ftype == "autocomplete":
+                    # Try to find the input element
+                    el = await _find_element(page, selector, label, ftype)
+                    if el:
+                        fr = await _fill_react_select_field(page, el, value, label)
+                    else:
+                        fr_rs = await _fill_react_select_by_label(page, label, value)
+                        fr = fr_rs or FieldResult(label, selector, "autocomplete", value, "error",
+                                                   f"Could not find autocomplete: {label}")
+                    field_results.append(fr)
+                    if fr.status in ("filled", "verified"):
+                        filled += 1
+                        # Cascading wait
+                        label_lower = label.lower()
+                        if any(kw in label_lower for kw in ("state", "country", "province", "region")):
+                            await asyncio.sleep(random.uniform(2.0, 3.0))
+                    else:
+                        skipped += 1
+                        if fr.error_message:
+                            errors.append(fr.error_message)
+                    continue
 
                 # ── Handle radio buttons (group-based, no _find_element) ──
                 if ftype == "radio":
@@ -1448,10 +1598,12 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
                         filled += 1
                         filled_selects.append(label.lower())
                         # Cascading wait: if this looks like a state/country,
-                        # pause for dependent fields to load
+                        # pause for dependent fields to load their options
                         label_lower = label.lower()
                         if any(kw in label_lower for kw in ("state", "country", "province", "region")):
-                            await asyncio.sleep(random.uniform(1.5, 2.5))
+                            await asyncio.sleep(random.uniform(2.0, 3.0))
+                            # Re-dismiss popups in case cascade triggered a reload
+                            await _dismiss_popups(page)
                     else:
                         skipped += 1
                         if fr.error_message:
@@ -1484,6 +1636,11 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
                 # ── Route to the correct handler ──
                 if real_type == "react_select":
                     fr = await _fill_react_select_field(page, el, value, label)
+                    # Cascading wait for react selects (state → city)
+                    if fr.status in ("filled", "verified"):
+                        label_lower = label.lower()
+                        if any(kw in label_lower for kw in ("state", "country", "province", "region")):
+                            await asyncio.sleep(random.uniform(2.0, 3.0))
 
                 elif real_type == "datepicker":
                     fr = await _fill_datepicker(page, el, value, label)

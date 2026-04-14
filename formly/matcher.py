@@ -28,8 +28,12 @@ CRITICAL RULES:
 2. NEVER put CSS selectors (#something, .something, input[...]) as a value
 3. NEVER put technical identifiers as values
 4. If you don't know the value, set value=null — do NOT guess with technical garbage
-5. For selection/radio fields, the value MUST be one of the provided options
+5. For selection/radio/autocomplete fields with options listed, the value MUST be one of the provided options. NEVER invent values that aren't in the options list.
 6. Phone numbers should be just digits for "10 Digits" fields (no + prefix)
+7. For checkbox fields, return a COMMA-SEPARATED list of option labels to check. Match the user's hobbies/interests/skills to the closest available checkbox options.
+8. For "Hobbies" checkbox fields: look at the user's hobbies, interests, activities in their profile and select the matching options from the checkbox list.
+9. For "Subjects" autocomplete fields: if options are listed, pick from those options. If the user has skills/education fields, match them to available subject options.
+10. For cascading "State and City" fields: use the user's address to determine state and city.
 
 Return ONLY valid JSON — an array of objects:
 [

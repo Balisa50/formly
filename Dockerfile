@@ -6,7 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Force cache invalidation for source code
-RUN echo "build-v7-fix-submit-date-phone-ux"
+RUN echo "build-v8-prevent-submit-react-select-checkbox-review"
 COPY . .
 
 RUN mkdir -p data/uploads

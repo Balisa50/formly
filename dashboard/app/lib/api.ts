@@ -1,15 +1,36 @@
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// In production, use the Next.js proxy route (avoids DNS/CORS issues)
+// In dev, call backend directly
+// The proxy at /api/proxy/[...path] forwards to BACKEND/api/[...path]
+// So we set BASE to "" and the request() paths like "/api/health" become "/api/proxy/health" in production
+const IS_BROWSER = typeof window !== "undefined";
+const USE_PROXY = IS_BROWSER && !process.env.NEXT_PUBLIC_API_URL;
+const BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
-async function request<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    ...opts,
-    headers: { "Content-Type": "application/json", ...opts?.headers },
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(text || `${res.status} ${res.statusText}`);
+async function request<T>(path: string, opts?: RequestInit, retries = 2): Promise<T> {
+  // In production browser, rewrite /api/health → /api/proxy/health
+  const url = USE_PROXY ? path.replace(/^\/api\//, "/api/proxy/") : `${BASE}${path}`;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        ...opts,
+        headers: { "Content-Type": "application/json", ...opts?.headers },
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || `${res.status} ${res.statusText}`);
+      }
+      return res.json();
+    } catch (err) {
+      if (attempt < retries) {
+        // Server might be waking up — wait and retry
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+      throw new Error("Server is starting up. Please wait a moment and try again.");
+    }
   }
-  return res.json();
+  throw new Error("Server unreachable");
 }
 
 export const api = {
@@ -29,7 +50,8 @@ export const api = {
   uploadCV: async (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    const res = await fetch(`${BASE}/api/profile/cv`, { method: "POST", body: form });
+    const cvUrl = USE_PROXY ? "/api/proxy/profile/cv" : `${BASE}/api/profile/cv`;
+    const res = await fetch(cvUrl, { method: "POST", body: form });
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   },

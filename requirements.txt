@@ -1,4 +1,4 @@
-# Formly dependencies - v3.2 fix submit date phone
+# Formly dependencies - v4.0 prevent-submit react-select-fix checkbox-fix review-fix
 fastapi>=0.115
 uvicorn[standard]>=0.34
 python-multipart>=0.0.9
