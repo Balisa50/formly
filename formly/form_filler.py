@@ -520,20 +520,31 @@ async def _fill_text(page: Page, el: ElementHandle, value: str, label: str) -> F
 # ─── Phone number fields ────────────────────────────────
 
 async def _fill_phone(page: Page, el: ElementHandle, value: str, label: str) -> FieldResult:
-    """Read placeholder for format hints, adjust digits accordingly."""
+    """Read placeholder AND label for format hints, adjust digits accordingly."""
     selector = await _get_selector(el)
     try:
         placeholder = (await el.get_attribute("placeholder") or "").strip()
         maxlength = await el.get_attribute("maxlength")
 
-        # Parse placeholder for digit requirements
+        # Parse placeholder AND label for digit requirements
         digits_only = re.sub(r'\D', '', value)
         ph_lower = placeholder.lower()
+        label_lower = label.lower()
 
-        if "10 digit" in ph_lower or "10digit" in ph_lower:
-            # Strip country code — keep last 10 digits
-            if len(digits_only) > 10:
-                digits_only = digits_only[-10:]
+        # Check both placeholder and label for "N digit(s)" requirement
+        digit_req = None
+        digit_match = re.search(r'(\d{1,2})\s*digit', ph_lower) or re.search(r'(\d{1,2})\s*digit', label_lower)
+        if digit_match:
+            digit_req = int(digit_match.group(1))
+
+        if digit_req:
+            # Field explicitly requires N digits — respect it exactly
+            if len(digits_only) > digit_req:
+                # Too many digits — strip from the left (remove country code)
+                digits_only = digits_only[-digit_req:]
+            elif len(digits_only) < digit_req:
+                # Too few digits — zero-pad on the left (do NOT add country code)
+                digits_only = digits_only.zfill(digit_req)
             formatted = digits_only
         elif maxlength and maxlength.isdigit():
             ml = int(maxlength)
@@ -983,60 +994,89 @@ async def _fill_datepicker(page: Page, el: ElementHandle, value: str,
         }""")
 
         if has_calendar:
-            # Navigate to correct month/year using arrow buttons
-            for _ in range(120):  # max 10 years of navigation
-                header_text = await page.evaluate("""() => {
-                    const hdr = document.querySelector(
-                        '.react-datepicker__current-month, ' +
-                        '[class*="datepicker__header"] [class*="current"], ' +
-                        '[class*="calendar"] [class*="header"], ' +
-                        '.flatpickr-current-month'
-                    );
-                    return hdr ? hdr.textContent.trim() : '';
-                }""")
+            # ── Strategy 1: Use month/year dropdowns if available ──
+            # React datepicker (demoqa-style) often has <select> dropdowns
+            # for month and year, which is far faster than clicking arrows.
+            dropdown_set = await page.evaluate("""(args) => {
+                const [targetMonth, targetYear] = args;
+                const monthSel = document.querySelector(
+                    '.react-datepicker__month-select, ' +
+                    'select[class*="month-select"], select[class*="month"]'
+                );
+                const yearSel = document.querySelector(
+                    '.react-datepicker__year-select, ' +
+                    'select[class*="year-select"], select[class*="year"]'
+                );
+                if (monthSel && yearSel) {
+                    // Month dropdown uses 0-indexed values (0=Jan, 11=Dec)
+                    const monthIdx = targetMonth - 1;
+                    monthSel.value = String(monthIdx);
+                    monthSel.dispatchEvent(new Event('change', {bubbles: true}));
+                    yearSel.value = String(targetYear);
+                    yearSel.dispatchEvent(new Event('change', {bubbles: true}));
+                    return true;
+                }
+                return false;
+            }""", [month, year])
 
-                if not header_text:
-                    break
+            if dropdown_set:
+                await asyncio.sleep(0.5)
+            else:
+                # ── Strategy 2: Click arrow buttons (up to 300 = ~25 years) ──
+                for _ in range(300):
+                    header_text = await page.evaluate("""() => {
+                        const hdr = document.querySelector(
+                            '.react-datepicker__current-month, ' +
+                            '[class*="datepicker__header"] [class*="current"], ' +
+                            '[class*="calendar"] [class*="header"], ' +
+                            '.flatpickr-current-month'
+                        );
+                        return hdr ? hdr.textContent.trim() : '';
+                    }""")
 
-                # Check if we're at the right month/year
-                if target_month_name.lower() in header_text.lower() and str(year) in header_text:
-                    break
-
-                # Determine direction — parse current month/year from header
-                current_year = None
-                current_month = None
-                for i, mn in enumerate(_MONTH_NAMES):
-                    if mn.lower() in header_text.lower() or mn[:3].lower() in header_text.lower():
-                        current_month = i + 1
+                    if not header_text:
                         break
-                year_match = re.search(r'(19|20)\d{2}', header_text)
-                if year_match:
-                    current_year = int(year_match.group())
 
-                if current_year and current_month:
-                    current_val = current_year * 12 + current_month
-                    target_val = year * 12 + month
-                    if target_val > current_val:
-                        arrow_sel = ('.react-datepicker__navigation--next, '
-                                     '[class*="datepicker"] [class*="next"], '
-                                     '[class*="calendar"] button[class*="next"], '
-                                     '.flatpickr-next-month')
+                    # Check if we're at the right month/year
+                    if target_month_name.lower() in header_text.lower() and str(year) in header_text:
+                        break
+
+                    # Determine direction — parse current month/year from header
+                    current_year = None
+                    current_month = None
+                    for i, mn in enumerate(_MONTH_NAMES):
+                        if mn.lower() in header_text.lower() or mn[:3].lower() in header_text.lower():
+                            current_month = i + 1
+                            break
+                    year_match = re.search(r'(19|20)\d{2}', header_text)
+                    if year_match:
+                        current_year = int(year_match.group())
+
+                    if current_year and current_month:
+                        current_val = current_year * 12 + current_month
+                        target_val = year * 12 + month
+                        if target_val > current_val:
+                            arrow_sel = ('.react-datepicker__navigation--next, '
+                                         '[class*="datepicker"] [class*="next"], '
+                                         '[class*="calendar"] button[class*="next"], '
+                                         '.flatpickr-next-month')
+                        else:
+                            arrow_sel = ('.react-datepicker__navigation--previous, '
+                                         '[class*="datepicker"] [class*="prev"], '
+                                         '[class*="calendar"] button[class*="prev"], '
+                                         '.flatpickr-prev-month')
                     else:
+                        # Default to previous (most datepickers open at today,
+                        # and DOB targets are in the past)
                         arrow_sel = ('.react-datepicker__navigation--previous, '
-                                     '[class*="datepicker"] [class*="prev"], '
-                                     '[class*="calendar"] button[class*="prev"], '
-                                     '.flatpickr-prev-month')
-                else:
-                    # Default to next
-                    arrow_sel = ('.react-datepicker__navigation--next, '
-                                 '[class*="datepicker"] [class*="next"]')
+                                     '[class*="datepicker"] [class*="prev"]')
 
-                arrow = await page.query_selector(arrow_sel)
-                if arrow:
-                    await arrow.click()
-                    await asyncio.sleep(0.35)
-                else:
-                    break
+                    arrow = await page.query_selector(arrow_sel)
+                    if arrow:
+                        await arrow.click()
+                        await asyncio.sleep(0.35)
+                    else:
+                        break
 
             # Click the correct day
             day_clicked = await page.evaluate("""(day) => {
@@ -1180,19 +1220,51 @@ async def _handle_dynamic_fields(page: Page):
 # ─── Multi-page navigation ──────────────────────────────
 
 async def _navigate_pages(page: Page, matches: list[dict]) -> int:
-    """Detect and handle multi-page forms. Does NOT click submit."""
+    """Detect and handle multi-page forms. Does NOT click submit.
+
+    SAFETY: Only clicks buttons whose trimmed text EXACTLY matches a known
+    navigation word.  Never clicks anything that looks like a submit,
+    payment, or sign-up button — even if it also contains a nav word."""
     pages = 1
     max_pages = 10
 
     while pages < max_pages:
         next_clicked = await page.evaluate("""() => {
             const btns = [...document.querySelectorAll('button, input[type="submit"], a.btn, [role="button"], a[class*="btn"]')];
-            const nextWords = ['next', 'continue', 'proceed', 'forward', 'siguiente', 'suivant', 'weiter'];
+
+            /* ── Dangerous words: NEVER click any button containing these ── */
+            const dangerWords = [
+                'submit', 'send', 'apply', 'finish', 'complete', 'confirm',
+                'register', 'sign up', 'signup', 'create', 'pay', 'order',
+                'checkout', 'check out', 'place order', 'subscribe', 'donate',
+                'purchase', 'buy', 'enroll', 'enrol', 'book now', 'reserve'
+            ];
+
+            /* ── Safe navigation words: the button text must EXACTLY match ── */
+            const safeExact = ['next', 'continue', 'proceed', 'forward',
+                               'siguiente', 'suivant', 'weiter',
+                               'next step', 'next page', 'go to next'];
+
+            /* ── Dangerous CSS classes on the button itself ── */
+            const dangerClasses = ['primary', 'danger', 'success', 'btn-submit',
+                                   'btn-danger', 'btn-primary', 'submit'];
+
             for (const btn of btns) {
-                const text = (btn.textContent || btn.value || '').trim().toLowerCase();
-                const isSubmit = text.includes('submit') || text.includes('finish') || text.includes('complete');
-                if (isSubmit) return 'submit_found';
-                if (nextWords.some(w => text.includes(w)) && btn.offsetParent !== null) {
+                const raw = (btn.textContent || btn.value || '').trim();
+                const text = raw.toLowerCase();
+
+                /* Skip anything with a dangerous word anywhere in its text */
+                if (dangerWords.some(w => text.includes(w))) continue;
+
+                /* Skip input[type="submit"] outright */
+                if (btn.tagName === 'INPUT' && (btn.type || '').toLowerCase() === 'submit') continue;
+
+                /* Skip buttons styled as primary / danger / success */
+                const cls = (btn.className || '').toLowerCase();
+                if (dangerClasses.some(c => cls.includes(c))) continue;
+
+                /* Only click if the EXACT trimmed text matches a safe word */
+                if (safeExact.includes(text) && btn.offsetParent !== null) {
                     btn.click();
                     return 'clicked';
                 }

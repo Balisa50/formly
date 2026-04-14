@@ -6,7 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Force cache invalidation for source code
-RUN echo "build-v6-intelligent-agent-brain"
+RUN echo "build-v7-fix-submit-date-phone-ux"
 COPY . .
 
 RUN mkdir -p data/uploads

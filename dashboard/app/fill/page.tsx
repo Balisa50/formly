@@ -17,7 +17,7 @@ type ReviewField = {
   value: string;
   match_type: string;
   confidence: number;
-  status: "filled" | "skipped";
+  status: "filled" | "skipped" | "verified" | "error" | "needs_user";
 };
 
 export default function FillFormPage() {
@@ -64,6 +64,20 @@ export default function FillFormPage() {
       const key = m.selector || m.label;
       if (seen.has(key)) continue;
       seen.add(key);
+      // Determine granular status
+      let fieldStatus: ReviewField["status"];
+      if (!m.value) {
+        fieldStatus = "skipped";
+      } else if (m.match_type === "needs_user" || m.match_type === "user_required") {
+        fieldStatus = "needs_user";
+      } else if (m.error || m.status === "error") {
+        fieldStatus = "error";
+      } else if (m.match_type === "verified" || (m.confidence ?? 0) >= 0.95) {
+        fieldStatus = "verified";
+      } else {
+        fieldStatus = "filled";
+      }
+
       fields.push({
         label: m.label || m.selector || "Unknown field",
         selector: m.selector,
@@ -71,7 +85,7 @@ export default function FillFormPage() {
         value: m.value || "",
         match_type: m.match_type || "unknown",
         confidence: m.confidence ?? 0,
-        status: m.value ? "filled" : "skipped",
+        status: fieldStatus,
       });
     }
 
@@ -265,7 +279,7 @@ export default function FillFormPage() {
     setReviewFields((prev) =>
       prev.map((f, i) =>
         i === index
-          ? { ...f, value: newValue, status: newValue ? "filled" : "skipped" }
+          ? { ...f, value: newValue, status: newValue ? (f.status === "verified" ? "verified" : "filled") : "skipped" }
           : f
       )
     );
@@ -344,9 +358,39 @@ export default function FillFormPage() {
             <div ref={logEndRef} />
           </div>
 
-          {/* Gap question input */}
+          {/* Gap questions — shown ONE at a time */}
           {phase === "asking" && gapIndex < gapQuestions.length && (
-            <div className="border-t border-border p-3">
+            <div className="border-t border-border p-3 space-y-3">
+              {/* Progress indicator */}
+              <p className="text-xs text-text-muted">
+                Question {gapIndex + 1} of {gapQuestions.length}
+              </p>
+
+              {/* Current question */}
+              <div className="bg-blue-500/10 rounded-lg px-4 py-3">
+                <p className="text-sm text-blue-400 font-medium">
+                  {gapQuestions[gapIndex].question || gapQuestions[gapIndex].label || `What is your ${gapQuestions[gapIndex].label}?`}
+                </p>
+                {gapQuestions[gapIndex].label && gapQuestions[gapIndex].question && (
+                  <p className="text-xs text-text-muted mt-1">Field: {gapQuestions[gapIndex].label}</p>
+                )}
+              </div>
+
+              {/* Previously answered questions (compact) */}
+              {gapIndex > 0 && (
+                <div className="space-y-1">
+                  {gapQuestions.slice(0, gapIndex).map((q: any, i: number) => (
+                    <div key={i} className="flex items-center gap-2 text-xs text-text-muted">
+                      <svg className="w-3 h-3 text-green shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                      <span className="truncate">{q.label}: {gapAnswers[q.selector] || "answered"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Input */}
               <div className="flex gap-2">
                 <input className="input flex-1" placeholder="Type your answer..." value={userInput}
                   onChange={(e) => setUserInput(e.target.value)}
@@ -377,9 +421,16 @@ export default function FillFormPage() {
                   <div>
                     <p className="font-bold text-lg">Review & Edit</p>
                     <p className="text-text-muted text-sm">
-                      {reviewFields.filter((f) => f.status === "filled").length} filled,{" "}
-                      {reviewFields.filter((f) => f.status === "skipped").length} skipped
-                      — edit any value before re-filling.
+                      {reviewFields.filter((f) => f.status === "verified").length > 0 &&
+                        `${reviewFields.filter((f) => f.status === "verified").length} verified, `}
+                      {reviewFields.filter((f) => f.status === "filled").length} filled
+                      {reviewFields.filter((f) => f.status === "skipped").length > 0 &&
+                        `, ${reviewFields.filter((f) => f.status === "skipped").length} skipped`}
+                      {reviewFields.filter((f) => f.status === "error").length > 0 &&
+                        `, ${reviewFields.filter((f) => f.status === "error").length} with issues`}
+                      {reviewFields.filter((f) => f.status === "needs_user").length > 0 &&
+                        `, ${reviewFields.filter((f) => f.status === "needs_user").length} need your input`}
+                      {" "}— edit any value before re-filling.
                     </p>
                   </div>
                 </div>
@@ -389,14 +440,41 @@ export default function FillFormPage() {
                 {reviewFields.map((field, i) => (
                   <div key={field.selector || i} className="flex items-center gap-3 px-5 py-3">
                     {/* Status icon */}
-                    <span className="shrink-0 text-base w-5 text-center" title={field.status === "filled" ? "Filled" : "Skipped"}>
-                      {field.status === "filled" ? (
-                        <svg className="w-4 h-4 text-green inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <span className="shrink-0 text-base w-5 text-center" title={
+                      field.status === "verified" ? "Verified" :
+                      field.status === "filled" ? "Filled" :
+                      field.status === "error" ? "Error" :
+                      field.status === "needs_user" ? "Needs your input" :
+                      "Skipped"
+                    }>
+                      {field.status === "verified" && (
+                        /* Green filled check — verified */
+                        <svg className="w-4 h-4 text-green inline-block" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
+                        </svg>
+                      )}
+                      {field.status === "filled" && (
+                        /* Green outline check — filled but not verified */
+                        <svg className="w-4 h-4 text-green inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                         </svg>
-                      ) : (
-                        <svg className="w-4 h-4 text-amber-400 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      )}
+                      {field.status === "error" && (
+                        /* Yellow warning — validation issue */
+                        <svg className="w-4 h-4 text-amber-400 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86l-8.4 14.31A1 1 0 002.72 20h18.56a1 1 0 00.85-1.47l-8.4-14.31a1.02 1.02 0 00-1.74 0z" />
+                        </svg>
+                      )}
+                      {field.status === "skipped" && (
+                        /* Red X — skipped */
+                        <svg className="w-4 h-4 text-red inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      )}
+                      {field.status === "needs_user" && (
+                        /* Blue person icon — needs user input */
+                        <svg className="w-4 h-4 text-blue-400 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                         </svg>
                       )}
                     </span>
@@ -428,7 +506,7 @@ export default function FillFormPage() {
                 <button
                   onClick={handleRefill}
                   disabled={isRefilling}
-                  className="bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-sm px-5 py-2.5 rounded-lg transition-colors inline-flex items-center gap-2"
+                  className="border border-white/10 hover:border-white/20 disabled:opacity-50 text-white text-sm px-5 py-2.5 rounded-lg transition-colors inline-flex items-center gap-2"
                 >
                   {isRefilling ? (
                     <>
@@ -445,23 +523,14 @@ export default function FillFormPage() {
                   )}
                 </button>
 
-                <a
-                  href={agentUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="border border-white/10 hover:border-white/20 text-white text-sm px-5 py-2.5 rounded-lg transition-colors inline-flex items-center gap-2"
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
-                  </svg>
-                  Open Form to Submit
-                </a>
-
                 <button
                   onClick={handleConfirmReview}
-                  className="ml-auto text-text-muted hover:text-text-secondary text-sm px-4 py-2.5 transition-colors"
+                  className="ml-auto bg-green/90 hover:bg-green text-white text-sm px-5 py-2.5 rounded-lg transition-colors inline-flex items-center gap-2"
                 >
-                  Looks Good
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                  Looks Good — Done
                 </button>
               </div>
             </div>
@@ -507,18 +576,11 @@ export default function FillFormPage() {
           {/* Bottom actions — shown in done phase */}
           {phase === "done" && (
             <div className="flex gap-3">
-              <a href={agentUrl} target="_blank" rel="noopener noreferrer"
-                className="bg-accent hover:bg-accent-hover text-white text-sm px-5 py-2.5 rounded-lg inline-flex items-center gap-2">
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
-                </svg>
-                Open Form to Review & Submit
-              </a>
               <button onClick={() => {
                 setPhase("idle"); setUrl(""); setLog([]); setFillMatches([]); setGapQuestions([]);
                 setGapIndex(0); setGapAnswers({}); setEssayDrafts([]); setScreenshot(""); setFillStats(null);
                 setError(""); setReviewFields([]); setIsRefilling(false);
-              }} className="text-text-muted text-sm px-4 py-2.5">Fill Another Form</button>
+              }} className="bg-accent hover:bg-accent-hover text-white text-sm px-5 py-2.5 rounded-lg">Fill Another Form</button>
             </div>
           )}
         </div>
