@@ -54,26 +54,44 @@ export default function FillFormPage() {
     setLog((prev) => [...prev, entry]);
   }, []);
 
-  // ── Build review fields from matches and fill stats ──
+  // ── Build review fields from ACTUAL fill results (not pre-fill matches) ──
   function buildReviewFields(matches: any[], stats: any): ReviewField[] {
     const fields: ReviewField[] = [];
     const seen = new Set<string>();
 
-    // Add all matches (filled fields)
+    // Use ACTUAL field_results from the backend if available
+    // These reflect what REALLY happened during fill (verified, error, etc.)
+    const fieldResults: any[] = stats?.field_results || [];
+
+    if (fieldResults.length > 0) {
+      for (const fr of fieldResults) {
+        const key = fr.selector || fr.label;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        fields.push({
+          label: fr.label || fr.selector || "Unknown field",
+          selector: fr.selector || "",
+          field_type: fr.field_type || "text",
+          value: fr.value || "",
+          match_type: fr.status || "unknown",
+          confidence: fr.status === "verified" ? 1.0 : fr.status === "filled" ? 0.7 : 0,
+          status: fr.status as ReviewField["status"] || "skipped",
+        });
+      }
+    }
+
+    // Also add any matches that weren't in field_results (skipped before fill)
     for (const m of matches) {
       const key = m.selector || m.label;
       if (seen.has(key)) continue;
       seen.add(key);
-      // Determine granular status
+
       let fieldStatus: ReviewField["status"];
       if (!m.value) {
         fieldStatus = "skipped";
-      } else if (m.match_type === "needs_user" || m.match_type === "user_required") {
-        fieldStatus = "needs_user";
-      } else if (m.error || m.status === "error") {
-        fieldStatus = "error";
-      } else if (m.match_type === "verified" || (m.confidence ?? 0) >= 0.95) {
-        fieldStatus = "verified";
+      } else if (m.match_type === "skipped") {
+        fieldStatus = "skipped";
       } else {
         fieldStatus = "filled";
       }
@@ -87,24 +105,6 @@ export default function FillFormPage() {
         confidence: m.confidence ?? 0,
         status: fieldStatus,
       });
-    }
-
-    // Add skipped fields from stats if available
-    if (stats?.skipped_fields) {
-      for (const s of stats.skipped_fields) {
-        const key = s.selector || s.label;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        fields.push({
-          label: s.label || s.selector || "Unknown field",
-          selector: s.selector,
-          field_type: s.field_type || "text",
-          value: "",
-          match_type: "skipped",
-          confidence: 0,
-          status: "skipped",
-        });
-      }
     }
 
     return fields;
