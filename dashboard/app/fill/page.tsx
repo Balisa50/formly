@@ -259,11 +259,20 @@ export default function FillFormPage() {
 
   function updateReviewField(index: number, newValue: string) {
     setReviewFields((prev) =>
-      prev.map((f, i) =>
-        i === index
-          ? { ...f, value: newValue, status: newValue ? (f.status === "verified" ? "verified" : "filled") : "skipped" }
-          : f
-      )
+      prev.map((f, i) => {
+        if (i !== index) return f;
+        const hasValue = !!newValue.trim();
+        // When user provides a value for a needs_user field, promote match_type
+        // so the backend doesn't skip it again on refill
+        const nextMatchType =
+          f.match_type === "needs_user" && hasValue ? "selection" : f.match_type;
+        return {
+          ...f,
+          value: newValue,
+          match_type: nextMatchType,
+          status: hasValue ? (f.status === "verified" ? "verified" : "filled") : "skipped",
+        };
+      })
     );
   }
 
@@ -380,12 +389,44 @@ export default function FillFormPage() {
                       <span className="text-sm text-text-secondary w-36 shrink-0 truncate" title={field.label}>
                         {field.label}
                       </span>
-                      <input
-                        className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors"
-                        value={field.value}
-                        placeholder={field.status === "skipped" ? "Enter a value..." : ""}
-                        onChange={(e) => updateReviewField(i, e.target.value)}
-                      />
+                      {(() => {
+                        // Detect the needs_user / "Options: ..." case
+                        const optionsMatch = /^Options:\s*(.+)$/i.exec(field.value || "");
+                        if (optionsMatch && field.status === "needs_user") {
+                          const opts = optionsMatch[1].split(",").map((s) => s.trim()).filter(Boolean);
+                          return (
+                            <div className="flex-1">
+                              <select
+                                className="w-full bg-background border border-accent/40 rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent transition-colors cursor-pointer"
+                                defaultValue=""
+                                onChange={(e) => {
+                                  if (e.target.value) updateReviewField(i, e.target.value);
+                                }}
+                              >
+                                <option value="" disabled>
+                                  Pick an option...
+                                </option>
+                                {opts.map((o) => (
+                                  <option key={o} value={o}>
+                                    {o}
+                                  </option>
+                                ))}
+                              </select>
+                              <p className="text-xs text-accent mt-1">
+                                Agent needs you to pick one of these — then click Re-fill.
+                              </p>
+                            </div>
+                          );
+                        }
+                        return (
+                          <input
+                            className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors"
+                            value={field.value}
+                            placeholder={field.status === "skipped" ? "Enter a value..." : ""}
+                            onChange={(e) => updateReviewField(i, e.target.value)}
+                          />
+                        );
+                      })()}
                     </div>
                   ))}
                   {reviewFields.length === 0 && (
