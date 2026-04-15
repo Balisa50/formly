@@ -462,9 +462,19 @@ async def _read_fields(url: str) -> tuple[list[FormField], str]:
                     if (label) break;
                 }
                 if (!label) label = input.getAttribute('aria-label') || '';
-                const phEl = container.querySelector('[class*="placeholder"]');
+                const phEl = container.querySelector('[class*="placeholder"]') ||
+                             (container.closest('[class*="__control"]') || container).querySelector('[class*="placeholder"]');
                 const placeholder = input.placeholder || (phEl ? phEl.textContent.trim() : '');
                 if (!label && placeholder) label = placeholder;
+
+                // Last resort: use the wrapper id as a label hint.
+                // demoqa has <div id="state"><div class="react-select..."/></div>.
+                if (!label) {
+                    const idWrapper = container.closest('[id]:not([id^="react-select"])');
+                    if (idWrapper && idWrapper.id && idWrapper.id.length < 40) {
+                        label = idWrapper.id;
+                    }
+                }
 
                 const options = [];
                 const menu = container.querySelector('[class*="menu"]');
@@ -626,18 +636,42 @@ async def _read_fields(url: str) -> tuple[list[FormField], str]:
 
         # Post-process: ensure every field has a good label
         page_title = title.strip()
+
+        # Count dropdowns so we can name unlabelled ones #1, #2, etc.
+        dropdown_counter = 0
+
         for data in all_field_data:
             label = data.get("label", "")
             el_id = data.get("id", "")
             name = data.get("name", "")
+            placeholder = data.get("placeholder", "")
+            field_type = data.get("field_type", "text")
 
             # If label matches page title, it's wrong -- picked up the heading
             if label and label.lower() == page_title.lower():
                 label = ""
 
-            # If label is too short (1 char) or empty, try humanizing the id/name
+            # Recognise react-select internal ids and refuse to humanize them.
+            # `react-select-3-input` → "React Select 3 Input" is useless to a
+            # user; prefer placeholder or a generic name with position hint.
+            react_select_id = bool(re.match(r"^react-select-\d+-input$", el_id or ""))
+
+            # If label is too short (1 char) or empty, try to find a better one
             if not label or len(label) <= 1:
-                label = _humanize_id(el_id) or _humanize_id(name) or "Unknown Field"
+                if react_select_id:
+                    # Skip id-humanising entirely for react-select internals
+                    if placeholder and len(placeholder) < 80:
+                        label = _clean_label(placeholder)
+                    else:
+                        dropdown_counter += 1
+                        label = f"Dropdown #{dropdown_counter}"
+                else:
+                    label = (
+                        _humanize_id(el_id)
+                        or _humanize_id(name)
+                        or (placeholder if placeholder and len(placeholder) < 80 else "")
+                        or "Unknown Field"
+                    )
 
             # Build selector if missing
             selector = data.get("selector", "")
