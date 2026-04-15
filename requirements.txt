@@ -1,4 +1,4 @@
-# Formly dependencies - v4.1 react-select-probe-fallback checkbox-no-name-fix
+# Formly dependencies - v4.2 react-select-needs-user file-upload-fix
 fastapi>=0.115
 uvicorn[standard]>=0.34
 python-multipart>=0.0.9

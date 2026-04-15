@@ -686,7 +686,7 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
         option_clicked = False
         clicked_text = ""
 
-        # JS helper to find and click an option
+        # JS: find best matching option and click it. Returns clicked text or ''.
         CLICK_OPTION_JS = """(val) => {
             const options = document.querySelectorAll(
                 '[class*="option"]:not([class*="disabled"]), ' +
@@ -709,16 +709,27 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
                 }
             }
             if (best) { best.click(); return bestText; }
-            // If no match but options exist, click the FIRST visible option
+            return '';
+        }"""
+
+        # JS: list all visible option texts (for needs_user fallback)
+        LIST_OPTIONS_JS = """() => {
+            const options = document.querySelectorAll(
+                '[class*="option"]:not([class*="disabled"]), ' +
+                '[class*="menu"] [class*="option"], ' +
+                '[role="option"], [class*="suggestion"], ' +
+                '[class*="__option"], [class*="-option"]'
+            );
+            const result = [];
             for (const opt of options) {
                 if (opt.offsetParent === null) continue;
                 const text = opt.textContent.trim();
                 if (text && !text.toLowerCase().includes('no option') && !text.toLowerCase().includes('not found')) {
-                    opt.click();
-                    return text;
+                    result.push(text);
                 }
+                if (result.length >= 20) break;
             }
-            return '';
+            return result;
         }"""
 
         for attempt_val in search_attempts:
@@ -742,19 +753,29 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
                 clicked_text = result
                 break
 
-        # Last resort: if all words failed, try single common letters to reveal ANY options
+        # If no match found, discover available options and ask the user
         if not option_clicked:
-            for probe in ["a", "c", "e", "m", "s"]:
+            all_options: list[str] = []
+            for probe in ["a", "c", "e", "m", "s", "b", "p"]:
                 await page.keyboard.press("Control+a")
                 await page.keyboard.press("Backspace")
                 await asyncio.sleep(0.2)
                 await page.keyboard.type(probe, delay=_typing_delay())
-                await asyncio.sleep(1.2)
-                result = await page.evaluate(CLICK_OPTION_JS, probe)
-                if result:
-                    option_clicked = True
-                    clicked_text = result
-                    break
+                await asyncio.sleep(1.0)
+                found = await page.evaluate(LIST_OPTIONS_JS)
+                for opt in (found or []):
+                    if opt not in all_options:
+                        all_options.append(opt)
+
+            # Close the dropdown
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+
+            if all_options:
+                return FieldResult(label, selector, "react_select",
+                                   f"Options: {', '.join(all_options[:15])}",
+                                   "needs_user",
+                                   f"No match for '{value}'. Available: {', '.join(all_options[:15])}")
 
         if option_clicked:
             await asyncio.sleep(0.5)
@@ -1273,12 +1294,81 @@ async def _fill_date_native(page: Page, el: ElementHandle, value: str,
 
 # ─── File upload ─────────────────────────────────────────
 
-async def _handle_file_upload(page: Page, el: ElementHandle, value: str,
+async def _handle_file_upload(page: Page, el: Optional[ElementHandle], value: str,
                                label: str) -> FieldResult:
-    """Don't skip silently — report back that the user must provide a file."""
-    selector = await _get_selector(el)
-    return FieldResult(label, selector, "file", value, "needs_user",
-                       f"File upload needed for '{label}'. Please provide the file.")
+    """Upload the user's profile photo or CV to a file input on the form."""
+    from pathlib import Path
+    from .config import UPLOADS_DIR
+
+    selector = ""
+    if el:
+        selector = await _get_selector(el)
+
+    # Find the actual file on disk
+    file_path: Optional[Path] = None
+
+    # Check for profile photo
+    for ext in ("jpg", "jpeg", "png", "webp"):
+        candidate = UPLOADS_DIR / f"profile_photo.{ext}"
+        if candidate.exists():
+            file_path = candidate
+            break
+
+    # Check if value is a direct filename in uploads
+    if not file_path and value:
+        candidate = UPLOADS_DIR / value
+        if candidate.exists():
+            file_path = candidate
+
+    # Check for any image file in uploads
+    if not file_path:
+        for f in UPLOADS_DIR.iterdir():
+            if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+                file_path = f
+                break
+
+    if not file_path:
+        return FieldResult(label, selector, "file", value, "needs_user",
+                           f"No uploaded file found for '{label}'. Please upload a photo first.")
+
+    # Find the file input element on the page
+    try:
+        file_input = None
+        if selector:
+            file_input = await page.query_selector(selector)
+
+        if not file_input:
+            # Try common file input selectors
+            for sel in [
+                'input[type="file"]',
+                '#uploadPicture',
+                'input[accept*="image"]',
+                'input[name*="file"]',
+                'input[name*="photo"]',
+                'input[name*="picture"]',
+                'input[name*="upload"]',
+            ]:
+                file_input = await page.query_selector(sel)
+                if file_input:
+                    break
+
+        if not file_input:
+            return FieldResult(label, selector, "file", str(file_path.name), "error",
+                               "Could not find file input element on page")
+
+        # Use Playwright's set_input_files to upload
+        await file_input.set_input_files(str(file_path))
+        await asyncio.sleep(0.5)
+
+        # Verify the file was set
+        has_file = await file_input.evaluate("e => e.files && e.files.length > 0")
+        if has_file:
+            return FieldResult(label, selector, "file", str(file_path.name), "verified",
+                               f"Uploaded {file_path.name}")
+        return FieldResult(label, selector, "file", str(file_path.name), "filled")
+
+    except Exception as exc:
+        return FieldResult(label, selector, "file", value, "error", str(exc)[:120])
 
 
 # ─── Utility: get a usable selector for an element ──────
@@ -1581,9 +1671,13 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
 
                 # ── Handle file uploads ──
                 if ftype == "file":
-                    fr = await _handle_file_upload(page, None, value, label)
+                    el = await _find_element(page, selector, label, ftype)
+                    fr = await _handle_file_upload(page, el, value, label)
                     field_results.append(fr)
-                    skipped += 1
+                    if fr.status in ("filled", "verified"):
+                        filled += 1
+                    else:
+                        skipped += 1
                     continue
 
                 # ── Handle selects (native + React) ──
