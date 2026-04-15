@@ -9,49 +9,43 @@ const PERSONAL_FIELDS = [
   { key: "email", label: "Email", placeholder: "e.g. you@example.com" },
   { key: "phone", label: "Phone", placeholder: "e.g. +220 123 4567" },
   { key: "nationality", label: "Nationality", placeholder: "e.g. Gambian" },
-  { key: "date_of_birth", label: "Date of Birth", placeholder: "e.g. 01/01/2000" },
+  { key: "date_of_birth", label: "Date of Birth", placeholder: "e.g. 2000-01-01" },
   { key: "address", label: "Address", placeholder: "e.g. Banjul, Gambia" },
-  { key: "linkedin", label: "LinkedIn", placeholder: "e.g. linkedin.com/in/yourname" },
-  { key: "website", label: "Website / Portfolio", placeholder: "e.g. yourname.dev" },
-  { key: "github", label: "GitHub", placeholder: "e.g. github.com/yourname" },
-];
-
-const EXTRA_FIELDS = [
-  { key: "summary", label: "Professional Summary", placeholder: "2-3 sentence summary of who you are and what you do", textarea: true },
-  { key: "certifications", label: "Certifications", placeholder: "e.g. AWS Solutions Architect, Google Analytics, PMP", textarea: false },
-  { key: "achievements", label: "Awards & Achievements", placeholder: "e.g. Dean's List 2024, First Place Hackathon", textarea: false },
-  { key: "hobbies", label: "Hobbies & Interests", placeholder: "e.g. Football, reading, open source", textarea: false },
-  { key: "volunteer", label: "Volunteer Experience", placeholder: "e.g. Red Cross volunteer 2022-2023", textarea: true },
+  { key: "linkedin", label: "LinkedIn URL", placeholder: "e.g. linkedin.com/in/yourname" },
 ];
 
 export default function ProfilePage() {
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<string>("");
-  const [completeness, setCompleteness] = useState(0);
-  const [photoUrl, setPhotoUrl] = useState<string>("");
-  const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
+  // CV upload
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+
+  // Personal fields
   const [personal, setPersonal] = useState<Record<string, string>>({});
+  const [bio, setBio] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // References
-  const [showAddRef, setShowAddRef] = useState(false);
-  const [newRef, setNewRef] = useState({ name: "", title: "", company: "", email: "", phone: "", relationship: "" });
-
-  // Work
-  const [showAddWork, setShowAddWork] = useState(false);
-  const [newWork, setNewWork] = useState({ company: "", title: "", start_date: "", end_date: "", description: "" });
+  // Completeness
+  const [completeness, setCompleteness] = useState(0);
 
   // Education
   const [showAddEdu, setShowAddEdu] = useState(false);
-  const [newEdu, setNewEdu] = useState({ institution: "", degree: "", field: "", start_date: "", end_date: "", gpa: "" });
+  const [newEdu, setNewEdu] = useState({
+    institution: "", degree: "", field: "", start_date: "", end_date: "", gpa: "",
+  });
 
-  // Skills & Languages
+  // Work
+  const [showAddWork, setShowAddWork] = useState(false);
+  const [newWork, setNewWork] = useState({
+    company: "", title: "", start_date: "", end_date: "", description: "",
+  });
+
+  // Skills
   const [newSkill, setNewSkill] = useState("");
-  const [newLanguage, setNewLanguage] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -59,42 +53,22 @@ export default function ProfilePage() {
       setProfile(p);
       setCompleteness(c.completeness);
       setPersonal(p.personal || {});
-      if (p.personal?.photo_url) setPhotoUrl(p.personal.photo_url);
+      setBio(p.personal?.summary || "");
     } catch {}
     setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  async function handlePhoto(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploadingPhoto(true);
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const res = await fetch(`${BASE}/api/profile/photo`, { method: "POST", body: form });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setPhotoUrl(data.url || "uploaded");
-      await load();
-    } catch (err) {
-      console.error("Photo upload failed:", err);
-    }
-    setUploadingPhoto(false);
-  }
-
-  async function handleCV(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // ---- CV Upload ----
+  async function processCV(file: File) {
     setUploading(true);
-    setUploadStatus("Reading your CV and extracting your details...");
+    setUploadStatus("Reading your CV and extracting details...");
     try {
       const result = await api.uploadCV(file);
       const ext = result.extracted;
       setUploadStatus(
-        `CV parsed! Found ${ext.work} job${ext.work !== 1 ? "s" : ""}, ${ext.education} education entr${ext.education !== 1 ? "ies" : "y"}, ${ext.skills} skills${ext.languages ? `, ${ext.languages} languages` : ""}. All fields updated below.`
+        `CV parsed! Found ${ext.work} job${ext.work !== 1 ? "s" : ""}, ${ext.education} education entr${ext.education !== 1 ? "ies" : "y"}, ${ext.skills} skills. All fields updated below.`
       );
       await load();
       setTimeout(() => setUploadStatus(""), 8000);
@@ -104,11 +78,26 @@ export default function ProfilePage() {
     setUploading(false);
   }
 
-  async function savePersonal() {
+  function handleCVInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) processCV(file);
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file && (file.type === "application/pdf" || file.name.endsWith(".pdf"))) {
+      processCV(file);
+    }
+  }
+
+  // ---- Save personal ----
+  async function handleSave() {
     setSaving(true);
     setSaveSuccess(false);
-    const fields = Object.entries(personal)
-      .filter(([, v]) => v.trim())
+    const fields = Object.entries({ ...personal, summary: bio })
+      .filter(([, v]) => v && v.trim())
       .map(([key, value]) => ({ key, value, category: "personal" }));
     await api.setProfileBatch(fields);
     await load();
@@ -117,14 +106,7 @@ export default function ProfilePage() {
     setTimeout(() => setSaveSuccess(false), 3000);
   }
 
-  async function handleAddWork() {
-    if (!newWork.company && !newWork.title) return;
-    await api.addWork(newWork);
-    setNewWork({ company: "", title: "", start_date: "", end_date: "", description: "" });
-    setShowAddWork(false);
-    await load();
-  }
-
+  // ---- Education ----
   async function handleAddEdu() {
     if (!newEdu.institution && !newEdu.degree) return;
     await api.addEducation(newEdu);
@@ -133,29 +115,20 @@ export default function ProfilePage() {
     await load();
   }
 
+  // ---- Work ----
+  async function handleAddWork() {
+    if (!newWork.company && !newWork.title) return;
+    await api.addWork(newWork);
+    setNewWork({ company: "", title: "", start_date: "", end_date: "", description: "" });
+    setShowAddWork(false);
+    await load();
+  }
+
+  // ---- Skills ----
   async function handleAddSkill() {
     if (!newSkill.trim()) return;
     await api.addSkill({ name: newSkill.trim() });
     setNewSkill("");
-    await load();
-  }
-
-  async function handleAddLanguage() {
-    if (!newLanguage.trim()) return;
-    await api.addSkill({ name: newLanguage.trim(), category: "language" });
-    setNewLanguage("");
-    await load();
-  }
-
-  async function handleAddRef() {
-    if (!newRef.name) return;
-    const refStr = [newRef.name, newRef.title, newRef.company, newRef.email, newRef.phone, newRef.relationship]
-      .filter(Boolean).join(" | ");
-    // Store references as profile keys: reference_1, reference_2, etc.
-    const existingRefs = Object.keys(personal).filter(k => k.startsWith("reference_")).length;
-    await api.setProfileField(`reference_${existingRefs + 1}`, refStr, "references");
-    setNewRef({ name: "", title: "", company: "", email: "", phone: "", relationship: "" });
-    setShowAddRef(false);
     await load();
   }
 
@@ -167,171 +140,196 @@ export default function ProfilePage() {
     );
   }
 
-  const technicalSkills = profile?.skills?.filter((s: any) => s.category !== "language") || [];
-  const languages = profile?.skills?.filter((s: any) => s.category === "language") || [];
-  const references = Object.entries(personal).filter(([k]) => k.startsWith("reference_"));
+  const skills = profile?.skills?.filter((s: any) => s.category !== "language") || [];
+  const progressColor = completeness >= 100 ? "bg-green" : completeness >= 50 ? "bg-accent" : "bg-amber-400";
 
   return (
     <>
-      <h1 className="text-2xl font-bold mb-1">Your Profile</h1>
-      <p className="text-sm text-text-muted mb-6">The more you add, the more Formly can auto-fill. Upload a CV to get started instantly.</p>
-
-      {/* Completeness */}
-      <div className="flex items-center gap-3 mb-6">
-        <div className="flex-1 h-2.5 bg-surface rounded-full overflow-hidden">
+      {/* Profile Completeness */}
+      <div className="mb-8">
+        <div className="flex items-center justify-between mb-2">
+          <h1 className="text-2xl font-bold">Your Profile</h1>
+          <span className={`text-sm font-bold ${completeness >= 100 ? "text-green" : "text-text-secondary"}`}>
+            {completeness}% complete
+          </span>
+        </div>
+        <div className="w-full h-2.5 bg-surface rounded-full overflow-hidden">
           <div
-            className={`h-full rounded-full transition-all ${
-              completeness < 30 ? "bg-red" : completeness < 70 ? "bg-amber-400" : "bg-green"
-            }`}
+            className={`h-full rounded-full transition-all duration-500 ${progressColor}`}
             style={{ width: `${completeness}%` }}
           />
         </div>
-        <span className="text-sm font-bold">{completeness}%</span>
       </div>
 
-      {/* CV Upload */}
-      <div className="bg-surface rounded-xl border border-border p-5 mb-6">
-        <h2 className="font-semibold mb-2">Upload CV</h2>
-        <p className="text-sm text-text-muted mb-3">
-          Upload a PDF and Formly automatically fills in your name, contact info, education, work history, skills, languages, and certifications.
+      {/* CV Upload Area */}
+      <div
+        className={`relative rounded-xl border-2 border-dashed p-10 text-center mb-8 transition-colors ${
+          dragOver
+            ? "border-accent bg-accent/5"
+            : "border-border hover:border-text-muted"
+        }`}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+      >
+        <svg className="w-12 h-12 text-text-muted mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+        </svg>
+        <p className="text-lg font-semibold mb-1">Upload your CV</p>
+        <p className="text-sm text-text-muted mb-4">
+          We'll extract your name, education, work history, and skills automatically.
         </p>
-        <label className="inline-flex items-center gap-2 bg-accent hover:bg-accent-hover text-white text-sm px-4 py-2.5 rounded-lg cursor-pointer transition-colors">
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-          </svg>
-          {uploading ? "Parsing..." : "Choose PDF"}
-          <input type="file" accept=".pdf" onChange={handleCV} className="hidden" disabled={uploading} />
+        <label className="inline-flex items-center gap-2 bg-accent hover:bg-accent-hover text-white text-sm px-5 py-2.5 rounded-lg cursor-pointer transition-colors">
+          {uploading ? (
+            <>
+              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              Parsing...
+            </>
+          ) : (
+            "Choose PDF"
+          )}
+          <input type="file" accept=".pdf" onChange={handleCVInput} className="hidden" disabled={uploading} />
         </label>
+
         {uploadStatus && (
-          <div className={`mt-3 p-3 rounded-lg text-sm flex items-start gap-2 ${
+          <div className={`mt-4 p-3 rounded-lg text-sm inline-block ${
             uploading ? "bg-accent/10 text-accent" : uploadStatus.includes("parsed") ? "bg-green/10 text-green" : "bg-red/10 text-red"
           }`}>
-            {uploading && <div className="w-4 h-4 border-2 border-accent/30 border-t-accent rounded-full animate-spin shrink-0 mt-0.5" />}
             {uploadStatus}
           </div>
         )}
       </div>
 
-      {/* Profile Photo */}
-      <div className="bg-surface rounded-xl border border-border p-5 mb-6">
-        <h2 className="font-semibold mb-2">Profile Photo</h2>
-        <p className="text-sm text-text-muted mb-3">
-          Upload a passport-style photo. Many applications and forms require one.
-        </p>
-        <div className="flex items-center gap-4">
-          <div className="w-20 h-20 rounded-full bg-surface-elevated border-2 border-border flex items-center justify-center overflow-hidden shrink-0">
-            {photoUrl ? (
-              <div className="w-full h-full bg-green/10 flex items-center justify-center">
-                <svg className="w-8 h-8 text-green" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
-              </div>
-            ) : (
-              <svg className="w-8 h-8 text-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-              </svg>
-            )}
-          </div>
-          <div>
-            <label className="inline-flex items-center gap-2 bg-surface-elevated hover:bg-border text-text-secondary text-sm px-4 py-2 rounded-lg cursor-pointer transition-colors border border-border">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
-              </svg>
-              {uploadingPhoto ? "Uploading..." : photoUrl ? "Change Photo" : "Upload Photo"}
-              <input type="file" accept="image/*" onChange={handlePhoto} className="hidden" disabled={uploadingPhoto} />
-            </label>
-            {photoUrl && <p className="text-xs text-green mt-2">Photo uploaded and saved</p>}
-          </div>
-        </div>
-      </div>
-
       {/* Personal Details */}
       <Section title="Personal Details">
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {PERSONAL_FIELDS.map(({ key, label, placeholder }) => (
             <label key={key} className="block">
-              <span className="text-xs text-text-muted">{label}</span>
-              <input className="input mt-1" placeholder={placeholder} value={personal[key] || ""} onChange={(e) => setPersonal({ ...personal, [key]: e.target.value })} />
+              <span className="text-xs text-text-muted mb-1 block">{label}</span>
+              <input
+                className="input"
+                placeholder={placeholder}
+                value={personal[key] || ""}
+                onChange={(e) => setPersonal({ ...personal, [key]: e.target.value })}
+              />
             </label>
           ))}
         </div>
-        {/* Extra fields */}
-        <div className="mt-4 space-y-4">
-          {EXTRA_FIELDS.map(({ key, label, placeholder, textarea }) => (
-            <label key={key} className="block">
-              <span className="text-xs text-text-muted">{label}</span>
-              {textarea ? (
-                <textarea className="input mt-1" rows={3} placeholder={placeholder} value={personal[key] || ""} onChange={(e) => setPersonal({ ...personal, [key]: e.target.value })} />
-              ) : (
-                <input className="input mt-1" placeholder={placeholder} value={personal[key] || ""} onChange={(e) => setPersonal({ ...personal, [key]: e.target.value })} />
-              )}
-            </label>
-          ))}
-        </div>
-        <div className="flex items-center gap-3 mt-4">
-          <button onClick={savePersonal} disabled={saving} className="bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-sm px-4 py-2 rounded-lg transition-colors">
-            {saving ? "Saving..." : "Save All"}
-          </button>
-          {saveSuccess && <span className="text-sm text-green">Saved!</span>}
-        </div>
-      </Section>
-
-      {/* Work Experience */}
-      <Section title="Work Experience" action={<button onClick={() => setShowAddWork(!showAddWork)} className="text-xs text-accent hover:text-accent-hover">+ Add</button>}>
-        {profile?.work?.length === 0 && !showAddWork && (
-          <p className="text-sm text-text-muted">No work experience yet — add your jobs so Formly can fill experience fields automatically.</p>
-        )}
-        {profile?.work?.map((job: any) => (
-          <div key={job.id} className="flex items-start justify-between py-2 border-b border-border last:border-0">
-            <div>
-              <p className="text-sm font-medium">{job.title} at {job.company}</p>
-              <p className="text-xs text-text-muted">{job.start_date} — {job.end_date || "Present"}</p>
-              {job.description && <p className="text-xs text-text-secondary mt-1">{job.description}</p>}
-            </div>
-            <button onClick={() => { api.deleteWork(job.id).then(load); }} className="text-xs text-red hover:text-red/80">Delete</button>
-          </div>
-        ))}
-        {showAddWork && (
-          <div className="mt-3 space-y-3 border-t border-border pt-3">
-            <div className="grid grid-cols-2 gap-3">
-              <input className="input" placeholder="Company" value={newWork.company} onChange={(e) => setNewWork({ ...newWork, company: e.target.value })} />
-              <input className="input" placeholder="Job Title" value={newWork.title} onChange={(e) => setNewWork({ ...newWork, title: e.target.value })} />
-              <input className="input" placeholder="Start (2023-01)" value={newWork.start_date} onChange={(e) => setNewWork({ ...newWork, start_date: e.target.value })} />
-              <input className="input" placeholder="End (Present)" value={newWork.end_date} onChange={(e) => setNewWork({ ...newWork, end_date: e.target.value })} />
-            </div>
-            <textarea className="input" rows={2} placeholder="Description — what did you do there?" value={newWork.description} onChange={(e) => setNewWork({ ...newWork, description: e.target.value })} />
-            <button onClick={handleAddWork} className="bg-accent hover:bg-accent-hover text-white text-xs px-3 py-1.5 rounded-lg">Add</button>
-          </div>
-        )}
+        <label className="block mt-4">
+          <span className="text-xs text-text-muted mb-1 block">Bio / About Me</span>
+          <textarea
+            className="input"
+            rows={4}
+            placeholder="A short summary about yourself — used for cover letters and personal statements."
+            value={bio}
+            onChange={(e) => setBio(e.target.value)}
+          />
+        </label>
       </Section>
 
       {/* Education */}
-      <Section title="Education" action={<button onClick={() => setShowAddEdu(!showAddEdu)} className="text-xs text-accent hover:text-accent-hover">+ Add</button>}>
+      <Section
+        title="Education"
+        action={
+          <button onClick={() => setShowAddEdu(!showAddEdu)} className="text-xs text-accent hover:text-accent-hover">
+            + Add
+          </button>
+        }
+      >
         {profile?.education?.length === 0 && !showAddEdu && (
-          <p className="text-sm text-text-muted">No education entries yet — add your qualifications so forms auto-fill correctly.</p>
+          <p className="text-sm text-text-muted">No education entries yet.</p>
         )}
         {profile?.education?.map((edu: any) => (
-          <div key={edu.id} className="flex items-start justify-between py-2 border-b border-border last:border-0">
+          <div key={edu.id} className="flex items-start justify-between py-3 border-b border-border last:border-0">
             <div>
-              <p className="text-sm font-medium">{edu.degree}{edu.field ? ` in ${edu.field}` : ""}</p>
-              <p className="text-xs text-text-muted">{edu.institution} &middot; {edu.start_date} — {edu.end_date}</p>
-              {edu.gpa && <p className="text-xs text-text-secondary">GPA: {edu.gpa}</p>}
+              <p className="text-sm font-medium">
+                {edu.degree}{edu.field ? ` in ${edu.field}` : ""}
+              </p>
+              <p className="text-xs text-text-muted">
+                {edu.institution} &middot; {edu.start_date} - {edu.end_date || "Present"}
+              </p>
+              {edu.gpa && <p className="text-xs text-text-secondary mt-0.5">Grade: {edu.gpa}</p>}
             </div>
-            <button onClick={() => { api.deleteEducation(edu.id).then(load); }} className="text-xs text-red hover:text-red/80">Delete</button>
+            <button
+              onClick={() => { api.deleteEducation(edu.id).then(load); }}
+              className="text-xs text-red hover:text-red/80 shrink-0"
+            >
+              Remove
+            </button>
           </div>
         ))}
         {showAddEdu && (
-          <div className="mt-3 space-y-3 border-t border-border pt-3">
-            <div className="grid grid-cols-2 gap-3">
+          <div className="mt-3 space-y-3 border-t border-border pt-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <input className="input" placeholder="Institution" value={newEdu.institution} onChange={(e) => setNewEdu({ ...newEdu, institution: e.target.value })} />
-              <input className="input" placeholder="Degree (e.g. BSc, MSc, PhD)" value={newEdu.degree} onChange={(e) => setNewEdu({ ...newEdu, degree: e.target.value })} />
+              <input className="input" placeholder="Degree (e.g. BSc, MSc)" value={newEdu.degree} onChange={(e) => setNewEdu({ ...newEdu, degree: e.target.value })} />
               <input className="input" placeholder="Field of Study" value={newEdu.field} onChange={(e) => setNewEdu({ ...newEdu, field: e.target.value })} />
-              <input className="input" placeholder="GPA (optional)" value={newEdu.gpa} onChange={(e) => setNewEdu({ ...newEdu, gpa: e.target.value })} />
-              <input className="input" placeholder="Start (2020-09)" value={newEdu.start_date} onChange={(e) => setNewEdu({ ...newEdu, start_date: e.target.value })} />
-              <input className="input" placeholder="End (2024-06)" value={newEdu.end_date} onChange={(e) => setNewEdu({ ...newEdu, end_date: e.target.value })} />
+              <input className="input" placeholder="Grade (optional)" value={newEdu.gpa} onChange={(e) => setNewEdu({ ...newEdu, gpa: e.target.value })} />
+              <input className="input" placeholder="Start Year (e.g. 2020)" value={newEdu.start_date} onChange={(e) => setNewEdu({ ...newEdu, start_date: e.target.value })} />
+              <input className="input" placeholder="End Year (e.g. 2024)" value={newEdu.end_date} onChange={(e) => setNewEdu({ ...newEdu, end_date: e.target.value })} />
             </div>
-            <button onClick={handleAddEdu} className="bg-accent hover:bg-accent-hover text-white text-xs px-3 py-1.5 rounded-lg">Add</button>
+            <div className="flex gap-2">
+              <button onClick={handleAddEdu} className="bg-accent hover:bg-accent-hover text-white text-xs px-4 py-2 rounded-lg">
+                Add Education
+              </button>
+              <button onClick={() => setShowAddEdu(false)} className="text-xs text-text-muted hover:text-text-secondary px-3 py-2">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </Section>
+
+      {/* Work Experience */}
+      <Section
+        title="Work Experience"
+        action={
+          <button onClick={() => setShowAddWork(!showAddWork)} className="text-xs text-accent hover:text-accent-hover">
+            + Add
+          </button>
+        }
+      >
+        {profile?.work?.length === 0 && !showAddWork && (
+          <p className="text-sm text-text-muted">No work experience yet.</p>
+        )}
+        {profile?.work?.map((job: any) => (
+          <div key={job.id} className="flex items-start justify-between py-3 border-b border-border last:border-0">
+            <div>
+              <p className="text-sm font-medium">{job.title} at {job.company}</p>
+              <p className="text-xs text-text-muted">{job.start_date} - {job.end_date || "Present"}</p>
+              {job.description && <p className="text-xs text-text-secondary mt-1 max-w-lg">{job.description}</p>}
+            </div>
+            <button
+              onClick={() => { api.deleteWork(job.id).then(load); }}
+              className="text-xs text-red hover:text-red/80 shrink-0"
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+        {showAddWork && (
+          <div className="mt-3 space-y-3 border-t border-border pt-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <input className="input" placeholder="Company" value={newWork.company} onChange={(e) => setNewWork({ ...newWork, company: e.target.value })} />
+              <input className="input" placeholder="Role / Job Title" value={newWork.title} onChange={(e) => setNewWork({ ...newWork, title: e.target.value })} />
+              <input className="input" placeholder="Start Date (e.g. 2023-01)" value={newWork.start_date} onChange={(e) => setNewWork({ ...newWork, start_date: e.target.value })} />
+              <input className="input" placeholder="End Date (or Present)" value={newWork.end_date} onChange={(e) => setNewWork({ ...newWork, end_date: e.target.value })} />
+            </div>
+            <textarea
+              className="input"
+              rows={3}
+              placeholder="Responsibilities — what did you do there?"
+              value={newWork.description}
+              onChange={(e) => setNewWork({ ...newWork, description: e.target.value })}
+            />
+            <div className="flex gap-2">
+              <button onClick={handleAddWork} className="bg-accent hover:bg-accent-hover text-white text-xs px-4 py-2 rounded-lg">
+                Add Experience
+              </button>
+              <button onClick={() => setShowAddWork(false)} className="text-xs text-text-muted hover:text-text-secondary px-3 py-2">
+                Cancel
+              </button>
+            </div>
           </div>
         )}
       </Section>
@@ -339,71 +337,61 @@ export default function ProfilePage() {
       {/* Skills */}
       <Section title="Skills">
         <div className="flex flex-wrap gap-2 mb-4">
-          {technicalSkills.map((s: any) => (
-            <span key={s.id} className="inline-flex items-center gap-1 bg-surface-elevated text-text-secondary text-xs px-2.5 py-1 rounded-lg">
+          {skills.map((s: any) => (
+            <span
+              key={s.id}
+              className="inline-flex items-center gap-1.5 bg-accent/10 text-accent text-xs px-3 py-1.5 rounded-full"
+            >
               {s.name}
-              <button onClick={() => { api.deleteSkill(s.id).then(load); }} className="text-text-muted hover:text-red ml-1">x</button>
+              <button
+                onClick={() => { api.deleteSkill(s.id).then(load); }}
+                className="hover:text-red transition-colors"
+              >
+                x
+              </button>
             </span>
           ))}
-          {technicalSkills.length === 0 && <p className="text-sm text-text-muted">No skills yet.</p>}
+          {skills.length === 0 && <p className="text-sm text-text-muted">No skills yet. Type below and press Enter.</p>}
         </div>
         <div className="flex gap-2">
-          <input className="input flex-1" placeholder="e.g. Python, Data Analysis, Project Management" value={newSkill} onChange={(e) => setNewSkill(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleAddSkill()} />
-          <button onClick={handleAddSkill} className="bg-accent hover:bg-accent-hover text-white text-xs px-3 py-2 rounded-lg">Add</button>
+          <input
+            className="input flex-1"
+            placeholder="e.g. Python, Project Management, Data Analysis"
+            value={newSkill}
+            onChange={(e) => setNewSkill(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleAddSkill()}
+          />
+          <button onClick={handleAddSkill} className="bg-accent hover:bg-accent-hover text-white text-xs px-4 py-2 rounded-lg shrink-0">
+            Add
+          </button>
         </div>
       </Section>
 
-      {/* Languages */}
-      <Section title="Languages">
-        <div className="flex flex-wrap gap-2 mb-4">
-          {languages.map((s: any) => (
-            <span key={s.id} className="inline-flex items-center gap-1 bg-surface-elevated text-text-secondary text-xs px-2.5 py-1 rounded-lg">
-              {s.name}
-              <button onClick={() => { api.deleteSkill(s.id).then(load); }} className="text-text-muted hover:text-red ml-1">x</button>
-            </span>
-          ))}
-          {languages.length === 0 && <p className="text-sm text-text-muted">No languages yet — most forms ask for this.</p>}
-        </div>
-        <div className="flex gap-2">
-          <input className="input flex-1" placeholder="e.g. English, French, Mandinka, Wolof" value={newLanguage} onChange={(e) => setNewLanguage(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleAddLanguage()} />
-          <button onClick={handleAddLanguage} className="bg-accent hover:bg-accent-hover text-white text-xs px-3 py-2 rounded-lg">Add</button>
-        </div>
-      </Section>
-
-      {/* References */}
-      <Section title="References" action={<button onClick={() => setShowAddRef(!showAddRef)} className="text-xs text-accent hover:text-accent-hover">+ Add</button>}>
-        {references.length === 0 && !showAddRef && (
-          <p className="text-sm text-text-muted">No references yet — many applications require 2-3 professional references.</p>
-        )}
-        {references.map(([key, value]) => (
-          <div key={key} className="flex items-start justify-between py-2 border-b border-border last:border-0">
-            <div>
-              <p className="text-sm">{String(value).split(" | ").filter(Boolean).join(" — ")}</p>
-            </div>
-            <button onClick={() => { api.deleteProfileField(key).then(load); }} className="text-xs text-red hover:text-red/80">Delete</button>
-          </div>
-        ))}
-        {showAddRef && (
-          <div className="mt-3 space-y-3 border-t border-border pt-3">
-            <div className="grid grid-cols-2 gap-3">
-              <input className="input" placeholder="Full Name" value={newRef.name} onChange={(e) => setNewRef({ ...newRef, name: e.target.value })} />
-              <input className="input" placeholder="Job Title" value={newRef.title} onChange={(e) => setNewRef({ ...newRef, title: e.target.value })} />
-              <input className="input" placeholder="Company / Organization" value={newRef.company} onChange={(e) => setNewRef({ ...newRef, company: e.target.value })} />
-              <input className="input" placeholder="Email" value={newRef.email} onChange={(e) => setNewRef({ ...newRef, email: e.target.value })} />
-              <input className="input" placeholder="Phone" value={newRef.phone} onChange={(e) => setNewRef({ ...newRef, phone: e.target.value })} />
-              <input className="input" placeholder="Relationship (e.g. Supervisor)" value={newRef.relationship} onChange={(e) => setNewRef({ ...newRef, relationship: e.target.value })} />
-            </div>
-            <button onClick={handleAddRef} className="bg-accent hover:bg-accent-hover text-white text-xs px-3 py-1.5 rounded-lg">Add Reference</button>
-          </div>
-        )}
-      </Section>
+      {/* Save Button */}
+      <div className="sticky bottom-4 flex justify-end mt-4 mb-8">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-sm px-8 py-3 rounded-xl transition-colors shadow-lg shadow-accent/20 font-medium"
+        >
+          {saving ? "Saving..." : saveSuccess ? "Saved!" : "Save Profile"}
+        </button>
+      </div>
     </>
   );
 }
 
-function Section({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
+function Section({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="bg-surface rounded-xl border border-border p-5 mb-6">
+    <div className="bg-surface rounded-xl border border-border p-5 mb-5">
       <div className="flex items-center justify-between mb-4">
         <h2 className="font-semibold">{title}</h2>
         {action}
