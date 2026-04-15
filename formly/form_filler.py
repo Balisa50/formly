@@ -686,6 +686,41 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
         option_clicked = False
         clicked_text = ""
 
+        # JS helper to find and click an option
+        CLICK_OPTION_JS = """(val) => {
+            const options = document.querySelectorAll(
+                '[class*="option"]:not([class*="disabled"]), ' +
+                '[class*="menu"] [class*="option"], ' +
+                '[role="option"], [class*="suggestion"], ' +
+                '[class*="__option"], [class*="-option"]'
+            );
+            const valLower = val.toLowerCase();
+            let best = null;
+            let bestScore = Infinity;
+            let bestText = '';
+            for (const opt of options) {
+                if (opt.offsetParent === null) continue;
+                const text = opt.textContent.trim().toLowerCase();
+                if (text.includes('no option') || text.includes('not found')) continue;
+                if (text === valLower) { best = opt; bestScore = 0; bestText = opt.textContent.trim(); break; }
+                if (text.includes(valLower) || valLower.includes(text)) {
+                    const score = Math.abs(text.length - valLower.length);
+                    if (score < bestScore) { best = opt; bestScore = score; bestText = opt.textContent.trim(); }
+                }
+            }
+            if (best) { best.click(); return bestText; }
+            // If no match but options exist, click the FIRST visible option
+            for (const opt of options) {
+                if (opt.offsetParent === null) continue;
+                const text = opt.textContent.trim();
+                if (text && !text.toLowerCase().includes('no option') && !text.toLowerCase().includes('not found')) {
+                    opt.click();
+                    return text;
+                }
+            }
+            return '';
+        }"""
+
         for attempt_val in search_attempts:
             # Clear previous input
             await page.keyboard.press("Control+a")
@@ -700,46 +735,26 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
             # WAIT for suggestions dropdown to appear
             await asyncio.sleep(1.5)
 
-            # Find and click the matching option
-            result = await page.evaluate("""(val) => {
-                const options = document.querySelectorAll(
-                    '[class*="option"]:not([class*="disabled"]), ' +
-                    '[class*="menu"] [class*="option"], ' +
-                    '[role="option"], [class*="suggestion"], ' +
-                    '[class*="__option"], [class*="-option"]'
-                );
-                const valLower = val.toLowerCase();
-                let best = null;
-                let bestScore = Infinity;
-                let bestText = '';
-                for (const opt of options) {
-                    if (opt.offsetParent === null) continue;
-                    const text = opt.textContent.trim().toLowerCase();
-                    // Skip "no options" messages
-                    if (text.includes('no option') || text.includes('not found')) continue;
-                    if (text === valLower) { best = opt; bestScore = 0; bestText = opt.textContent.trim(); break; }
-                    if (text.includes(valLower) || valLower.includes(text)) {
-                        const score = Math.abs(text.length - valLower.length);
-                        if (score < bestScore) { best = opt; bestScore = score; bestText = opt.textContent.trim(); }
-                    }
-                }
-                if (best) { best.click(); return bestText; }
-                // If no match but options exist, click the FIRST visible option
-                for (const opt of options) {
-                    if (opt.offsetParent === null) continue;
-                    const text = opt.textContent.trim();
-                    if (text && !text.toLowerCase().includes('no option') && !text.toLowerCase().includes('not found')) {
-                        opt.click();
-                        return text;
-                    }
-                }
-                return '';
-            }""", attempt_val)
+            result = await page.evaluate(CLICK_OPTION_JS, attempt_val)
 
             if result:
                 option_clicked = True
                 clicked_text = result
                 break
+
+        # Last resort: if all words failed, try single common letters to reveal ANY options
+        if not option_clicked:
+            for probe in ["a", "c", "e", "m", "s"]:
+                await page.keyboard.press("Control+a")
+                await page.keyboard.press("Backspace")
+                await asyncio.sleep(0.2)
+                await page.keyboard.type(probe, delay=_typing_delay())
+                await asyncio.sleep(1.2)
+                result = await page.evaluate(CLICK_OPTION_JS, probe)
+                if result:
+                    option_clicked = True
+                    clicked_text = result
+                    break
 
         if option_clicked:
             await asyncio.sleep(0.5)
@@ -943,9 +958,17 @@ async def _fill_checkbox(page: Page, selector: str, label: str,
     """Read all checkbox labels, cross-reference with profile/value, check matches.
     Returns needs_user if no matching data."""
     values = [v.strip().lower() for v in value.split(",")]
-    checkboxes = await page.query_selector_all(selector) if selector else []
+    checkboxes = []
+    if selector:
+        checkboxes = await page.query_selector_all(selector)
     if not checkboxes:
+        # Try finding by label text proximity
         checkboxes = await page.query_selector_all('input[type="checkbox"]')
+    if not checkboxes:
+        # Also try custom checkbox wrappers (some sites use divs)
+        custom = await page.query_selector_all('[class*="custom-checkbox"] input, [class*="checkbox"] input[type="checkbox"]')
+        if custom:
+            checkboxes = custom
 
     if not checkboxes:
         return FieldResult(label, selector, "checkbox", value, "error", "No checkboxes found")
