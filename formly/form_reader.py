@@ -317,27 +317,54 @@ async def _read_fields(url: str) -> tuple[list[FormField], str]:
 
             // ── Checkbox groups (each option listed individually) ────
             const checkboxGroups = {};
+            let cbGroupCounter = 0;
             document.querySelectorAll('input[type="checkbox"]').forEach(el => {
-                const name = el.name;
-                if (!name) return;
-                if (!checkboxGroups[name]) {
-                    checkboxGroups[name] = {
+                // Use name, or fall back to id prefix, or a shared parent key
+                let groupKey = el.name;
+                if (!groupKey) {
+                    // Try to derive group from id (e.g. "hobbies-checkbox-1" → "hobbies-checkbox")
+                    const eid = el.id || '';
+                    const idBase = eid.replace(/[-_]?\d+$/, '');
+                    if (idBase) {
+                        groupKey = '__id__' + idBase;
+                    } else {
+                        // Group by closest wrapper element
+                        const wrapper = el.closest('.form-group, .col, .mb-3, fieldset, [class*="col"], [class*="wrapper"], [class*="group"]');
+                        if (wrapper) {
+                            if (!wrapper._cbGroupKey) { wrapper._cbGroupKey = '__auto__' + (++cbGroupCounter); }
+                            groupKey = wrapper._cbGroupKey;
+                        } else {
+                            groupKey = '__ungrouped__' + (++cbGroupCounter);
+                        }
+                    }
+                }
+                if (!checkboxGroups[groupKey]) {
+                    checkboxGroups[groupKey] = {
                         groupLabel: '',
                         items: [],
-                        required: el.required || el.getAttribute('aria-required') === 'true'
+                        required: el.required || el.getAttribute('aria-required') === 'true',
+                        hasName: !!el.name,
+                        name: el.name || ''
                     };
                     const fieldset = el.closest('fieldset');
                     if (fieldset) {
                         const legend = fieldset.querySelector('legend');
-                        if (legend) checkboxGroups[name].groupLabel = legend.textContent.trim().replace(/\\*/g, '');
+                        if (legend) checkboxGroups[groupKey].groupLabel = legend.textContent.trim().replace(/\\*/g, '');
                     }
-                    if (!checkboxGroups[name].groupLabel) {
-                        const parent = el.closest('.form-group, .col, .mb-3, .custom-control, [class*="col"]');
+                    if (!checkboxGroups[groupKey].groupLabel) {
+                        const parent = el.closest('.form-group, .col, .mb-3, .custom-control, [class*="col"], [class*="wrapper"]');
                         if (parent) {
                             const lbl = parent.parentElement?.querySelector('label, .label, [class*="label"]');
                             if (lbl && !lbl.contains(el)) {
-                                checkboxGroups[name].groupLabel = lbl.textContent.trim().replace(/\\*/g, '');
+                                checkboxGroups[groupKey].groupLabel = lbl.textContent.trim().replace(/\\*/g, '');
                             }
+                        }
+                    }
+                    // Also try looking at the id for a label hint
+                    if (!checkboxGroups[groupKey].groupLabel && el.id) {
+                        const idLabel = el.id.replace(/[-_]?\d+$/, '').replace(/[-_]/g, ' ').trim();
+                        if (idLabel && idLabel.length > 1) {
+                            checkboxGroups[groupKey].groupLabel = idLabel.charAt(0).toUpperCase() + idLabel.slice(1);
                         }
                     }
                 }
@@ -350,21 +377,33 @@ async def _read_fields(url: str) -> tuple[list[FormField], str]:
                 }
                 if (!optionLabel) optionLabel = el.value || '';
                 const optionId = el.id || '';
-                checkboxGroups[name].items.push({
+                checkboxGroups[groupKey].items.push({
                     label: optionLabel,
                     id: optionId,
                     value: el.value || ''
                 });
             });
 
-            for (const [name, info] of Object.entries(checkboxGroups)) {
+            for (const [groupKey, info] of Object.entries(checkboxGroups)) {
                 const allOptions = info.items.map(i => i.label).filter(Boolean);
+                // Build selector: use name if available, else use individual IDs
+                let cbSelector;
+                if (info.hasName && info.name) {
+                    cbSelector = 'input[name="' + info.name + '"]';
+                } else {
+                    const ids = info.items.map(i => i.id).filter(Boolean);
+                    if (ids.length > 0) {
+                        cbSelector = ids.map(id => '#' + CSS.escape(id)).join(', ');
+                    } else {
+                        cbSelector = 'input[type="checkbox"]';
+                    }
+                }
                 results.push({
-                    selector: 'input[name="' + name + '"]',
+                    selector: cbSelector,
                     field_type: 'checkbox',
                     label: info.groupLabel || '',
                     id: '',
-                    name: name,
+                    name: info.name || groupKey,
                     placeholder: '',
                     required: info.required,
                     options: allOptions,
