@@ -108,6 +108,8 @@ export const api = {
   listApplications: () => request<any[]>("/api/applications"),
   logApplication: (url: string, title = "", fields = {}) =>
     request<{ ok: boolean; id: number }>("/api/applications", { method: "POST", body: JSON.stringify({ url, title, fields }) }),
+  deleteApplication: (id: number) =>
+    request<{ ok: boolean }>(`/api/applications/${id}`, { method: "DELETE" }),
 
   // Stats
   getStats: () => request<{ total_applications: number; submitted: number; profile_fields: number; work_entries: number; education_entries: number; skills_count: number }>("/api/stats"),

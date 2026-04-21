@@ -404,6 +404,11 @@ def get_all_applications() -> list[dict]:
         return _fetchall(conn, "SELECT * FROM applications ORDER BY created_at DESC")
 
 
+def delete_application(id: int) -> None:
+    with get_conn() as conn:
+        _execute(conn, "DELETE FROM applications WHERE id = ?", (id,))
+
+
 # ─── Full profile export (for matcher/essay writer) ────
 
 def get_full_profile() -> dict:
