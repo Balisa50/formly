@@ -55,10 +55,7 @@ function Navbar() {
         <div className="flex items-center gap-3">
           {/* Desktop user */}
           {user && (
-            <div className="hidden sm:flex items-center gap-3">
-              <span className="text-xs text-text-muted truncate max-w-[140px]">
-                {user.email}
-              </span>
+            <div className="hidden sm:flex items-center">
               <button
                 onClick={signOut}
                 className="text-xs text-text-secondary hover:text-red transition-colors"
@@ -130,16 +127,13 @@ function Navbar() {
             );
           })}
           {user && (
-            <div className="pt-2 mt-1 border-t border-border flex items-center justify-between">
-              <span className="text-xs text-text-muted truncate max-w-[220px]">
-                {user.email}
-              </span>
+            <div className="pt-2 mt-1 border-t border-border">
               <button
                 onClick={() => {
                   setMenuOpen(false);
                   signOut();
                 }}
-                className="text-xs text-red hover:text-red/80 transition-colors"
+                className="w-full text-left px-3 py-2.5 text-sm text-red hover:text-red/80 transition-colors"
               >
                 Sign out
               </button>
