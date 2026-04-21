@@ -616,6 +616,12 @@ def update_application(id: int, status: str, fields: Optional[dict] = None):
     return {"ok": True}
 
 
+@app.delete("/api/applications/{id}")
+def delete_application(id: int):
+    db.delete_application(id)
+    return {"ok": True}
+
+
 # ─── Stats ──────────────────────────────────────────────
 
 @app.get("/api/stats")
