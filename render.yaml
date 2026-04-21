@@ -3,6 +3,8 @@ services:
     name: formly-api
     runtime: docker
     dockerfilePath: ./Dockerfile
+    plan: standard
+    branch: main
     envVars:
       - key: GROQ_API_KEY
         sync: false
@@ -10,5 +12,3 @@ services:
         sync: false
       - key: DASHBOARD_URL
         value: https://formly-dashboard.vercel.app
-    plan: free
-    branch: main

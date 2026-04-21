@@ -6,7 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Force cache invalidation for source code
-RUN echo "build-v11-groq-fallback-chain-react-select-label"
+RUN echo "build-v12-iframe-keyboard-fix-url-validation"
 COPY . .
 
 RUN mkdir -p data/uploads

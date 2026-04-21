@@ -17,7 +17,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from playwright.async_api import async_playwright, Page, BrowserContext, ElementHandle
+from playwright.async_api import async_playwright, Page, Frame, BrowserContext, ElementHandle
+
+# Union type used throughout so the same helpers work on both the main Page
+# and any child Frame (e.g. Workday / Greenhouse iframe embeds).
+PageOrFrame = Page | Frame
 
 
 # ─── Data classes ────────────────────────────────────────
@@ -251,7 +255,7 @@ async def _check_captcha(page: Page) -> bool:
 
 # ─── Smart element finding ───────────────────────────────
 
-async def _find_element(page: Page, selector: str, label: str, ftype: str) -> Optional[ElementHandle]:
+async def _find_element(page: PageOrFrame, selector: str, label: str, ftype: str) -> Optional[ElementHandle]:
     """Find an element using multiple strategies. Returns ElementHandle or None."""
 
     # Strategy 1: Direct CSS selector
@@ -584,16 +588,16 @@ async def _fill_native_select(page: Page, el: ElementHandle, value: str,
         try:
             await el.select_option(label=value)
         except Exception:
-            # Fuzzy match
-            matched = await el.evaluate("""(val) => {
-                const opts = [...this.options];
+            # Fuzzy match — note: el.evaluate receives (element, arg) so params are (el, val)
+            matched = await el.evaluate("""(el, val) => {
+                const opts = [...el.options];
                 const match = opts.find(o =>
                     o.text.toLowerCase().includes(val.toLowerCase()) ||
                     o.value.toLowerCase().includes(val.toLowerCase())
                 );
                 if (match) {
-                    this.value = match.value;
-                    this.dispatchEvent(new Event('change', {bubbles: true}));
+                    el.value = match.value;
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
                     return true;
                 }
                 return false;
@@ -604,11 +608,8 @@ async def _fill_native_select(page: Page, el: ElementHandle, value: str,
 
         await asyncio.sleep(0.5)
 
-        # Verify displayed value
-        displayed = await el.evaluate("""e => {
-            const opt = e.options[e.selectedIndex];
-            return opt ? opt.text.trim() : '';
-        }""")
+        # Verify displayed value — el.evaluate passes element as first arg
+        displayed = await el.evaluate("el => { const opt = el.options[el.selectedIndex]; return opt ? opt.text.trim() : ''; }")
         if displayed and value.lower() in displayed.lower():
             return FieldResult(label, selector, "native_select", value, "verified")
         return FieldResult(label, selector, "native_select", value, "filled")
@@ -687,7 +688,9 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
         clicked_text = ""
 
         # JS: find best matching option and click it. Returns clicked text or ''.
-        CLICK_OPTION_JS = """(val) => {
+        # NOTE: Uses el.evaluate() so document refers to the element's ownerDocument
+        # (correct for both main frame and <iframe>-embedded React Select widgets).
+        CLICK_OPTION_JS = """(el, val) => {
             const options = document.querySelectorAll(
                 '[class*="option"]:not([class*="disabled"]), ' +
                 '[class*="menu"] [class*="option"], ' +
@@ -713,7 +716,7 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
         }"""
 
         # JS: list all visible option texts (for needs_user fallback)
-        LIST_OPTIONS_JS = """() => {
+        LIST_OPTIONS_JS = """(el) => {
             const options = document.querySelectorAll(
                 '[class*="option"]:not([class*="disabled"]), ' +
                 '[class*="menu"] [class*="option"], ' +
@@ -733,7 +736,8 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
         }"""
 
         for attempt_val in search_attempts:
-            # Clear previous input
+            # Clear previous input — keyboard goes to whatever element has focus in
+            # the browser (works cross-frame because it's OS-level input)
             await page.keyboard.press("Control+a")
             await page.keyboard.press("Backspace")
             await asyncio.sleep(0.2)
@@ -746,7 +750,8 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
             # WAIT for suggestions dropdown to appear
             await asyncio.sleep(1.5)
 
-            result = await page.evaluate(CLICK_OPTION_JS, attempt_val)
+            # el.evaluate runs in the element's frame — works for iframes too
+            result = await el.evaluate(CLICK_OPTION_JS, attempt_val)
 
             if result:
                 option_clicked = True
@@ -762,7 +767,7 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
                 await asyncio.sleep(0.2)
                 await page.keyboard.type(probe, delay=_typing_delay())
                 await asyncio.sleep(1.0)
-                found = await page.evaluate(LIST_OPTIONS_JS)
+                found = await el.evaluate(LIST_OPTIONS_JS)
                 for opt in (found or []):
                     if opt not in all_options:
                         all_options.append(opt)
@@ -779,17 +784,14 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
 
         if option_clicked:
             await asyncio.sleep(0.5)
-            # Verify: check for selected value token or hidden input
-            has_value = await page.evaluate("""(sel) => {
-                // Check for multi-value tokens
-                const el = sel ? document.querySelector(sel) : null;
+            # Verify by traversing up from the element itself (frame-safe)
+            has_value = await el.evaluate("""(el) => {
                 let container = el;
                 for (let i = 0; i < 8 && container; i++) {
-                    container = container?.parentElement;
+                    container = container.parentElement;
                     if (!container) break;
                     const cls = (typeof container.className === 'string') ? container.className : '';
                     if (cls.includes('__control') || cls.includes('react-select') || cls.includes('auto-complete')) {
-                        // Check for selected values
                         const singleValue = container.parentElement?.querySelector('[class*="singleValue"], [class*="single-value"]');
                         const multiValues = container.parentElement?.querySelectorAll('[class*="multiValue"], [class*="multi-value"]');
                         if (singleValue && singleValue.textContent.trim()) return singleValue.textContent.trim();
@@ -800,7 +802,7 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
                     }
                 }
                 return '';
-            }""", selector)
+            }""")
 
             if has_value:
                 return FieldResult(label, selector, "react_select", clicked_text or value, "verified")
@@ -816,15 +818,25 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
         return FieldResult(label, selector, "react_select", value, "error", str(exc)[:120])
 
 
-async def _fill_react_select_by_label(page: Page, label: str, value: str) -> Optional[FieldResult]:
-    """Find a React Select near a label and fill it. Returns None if not found."""
+async def _fill_react_select_by_label(
+    ctx: PageOrFrame,
+    page: Page,
+    label: str,
+    value: str,
+) -> Optional[FieldResult]:
+    """Find a React Select near a label and fill it. Returns None if not found.
+
+    ``ctx`` is the DOM context for queries — may be a Frame for ATS iframes.
+    ``page`` is ALWAYS the top-level Page used for keyboard operations
+    (``Frame`` has no ``.keyboard`` attribute).
+    """
     try:
-        inputs = await page.query_selector_all(
+        inputs = await ctx.query_selector_all(
             'input[id*="react-select"], input[role="combobox"], '
             'input[class*="auto-complete"], input[id*="subjects"], '
             'input[id*="Subject"], input[id*="select"]'
         )
-        containers = await page.query_selector_all(
+        containers = await ctx.query_selector_all(
             '[class*="__control"], [class*="auto-complete__control"], '
             '[class*="react-select"], [class*="-container"][class*="css-"]'
         )
@@ -848,6 +860,8 @@ async def _fill_react_select_by_label(page: Page, label: str, value: str) -> Opt
                 return false;
             }""", label)
             if is_near:
+                # Always pass the top-level page for keyboard so the call works
+                # regardless of whether ctx is a Page or a Frame.
                 return await _fill_react_select_field(page, inp, value, label)
         return None
     except Exception:
@@ -1296,7 +1310,14 @@ async def _fill_date_native(page: Page, el: ElementHandle, value: str,
 
 async def _handle_file_upload(page: Page, el: Optional[ElementHandle], value: str,
                                label: str) -> FieldResult:
-    """Upload the user's profile photo or CV to a file input on the form."""
+    """Upload a file (CV, resume, profile photo) to a file input on the form.
+
+    Priority order for picking the file:
+    1. Explicit value matches a filename in UPLOADS_DIR
+    2. Label hints at CV/resume → prefer .pdf files
+    3. Label hints at photo/picture → prefer image files
+    4. Any file in UPLOADS_DIR (last resort)
+    """
     from pathlib import Path
     from .config import UPLOADS_DIR
 
@@ -1304,32 +1325,60 @@ async def _handle_file_upload(page: Page, el: Optional[ElementHandle], value: st
     if el:
         selector = await _get_selector(el)
 
+    label_lower = (label or "").lower()
+    is_cv_field = any(kw in label_lower for kw in (
+        "cv", "resume", "curriculum", "upload your cv", "upload cv",
+        "upload resume", "portfolio", "cover letter", "document",
+    ))
+    is_photo_field = any(kw in label_lower for kw in (
+        "photo", "picture", "image", "avatar", "headshot", "profile pic",
+    ))
+
     # Find the actual file on disk
     file_path: Optional[Path] = None
 
-    # Check for profile photo
-    for ext in ("jpg", "jpeg", "png", "webp"):
-        candidate = UPLOADS_DIR / f"profile_photo.{ext}"
-        if candidate.exists():
-            file_path = candidate
-            break
-
-    # Check if value is a direct filename in uploads
-    if not file_path and value:
+    # 1. Explicit value → direct filename match
+    if value:
         candidate = UPLOADS_DIR / value
         if candidate.exists():
             file_path = candidate
 
-    # Check for any image file in uploads
+    # 2. CV field → prefer PDF
+    if not file_path and is_cv_field:
+        for p in UPLOADS_DIR.iterdir():
+            if p.suffix.lower() == ".pdf":
+                file_path = p
+                break
+        # Fallback: any doc
+        if not file_path:
+            for p in UPLOADS_DIR.iterdir():
+                if p.suffix.lower() in (".doc", ".docx", ".txt"):
+                    file_path = p
+                    break
+
+    # 3. Photo field → prefer image
+    if not file_path and is_photo_field:
+        for ext in ("jpg", "jpeg", "png", "webp"):
+            candidate = UPLOADS_DIR / f"profile_photo.{ext}"
+            if candidate.exists():
+                file_path = candidate
+                break
+        if not file_path:
+            for p in UPLOADS_DIR.iterdir():
+                if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+                    file_path = p
+                    break
+
+    # 4. Any file in uploads
     if not file_path:
-        for f in UPLOADS_DIR.iterdir():
-            if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
-                file_path = f
+        for p in UPLOADS_DIR.iterdir():
+            if p.is_file() and not p.name.startswith("."):
+                file_path = p
                 break
 
     if not file_path:
         return FieldResult(label, selector, "file", value, "needs_user",
-                           f"No uploaded file found for '{label}'. Please upload a photo first.")
+                           f"No file found for '{label}'. Upload your CV or photo via the profile page first.")
 
     # Find the file input element on the page
     try:
@@ -1338,29 +1387,29 @@ async def _handle_file_upload(page: Page, el: Optional[ElementHandle], value: st
             file_input = await page.query_selector(selector)
 
         if not file_input:
-            # Try common file input selectors
-            for sel in [
+            # Ordered selector list — most specific first
+            candidates = [
                 'input[type="file"]',
-                '#uploadPicture',
+                '#uploadPicture', '#uploadCV', '#uploadResume',
+                'input[accept*=".pdf"]', 'input[accept*="pdf"]',
                 'input[accept*="image"]',
-                'input[name*="file"]',
-                'input[name*="photo"]',
-                'input[name*="picture"]',
-                'input[name*="upload"]',
-            ]:
+                'input[name*="cv"]', 'input[name*="resume"]',
+                'input[name*="file"]', 'input[name*="photo"]',
+                'input[name*="picture"]', 'input[name*="upload"]',
+                'input[name*="document"]',
+            ]
+            for sel in candidates:
                 file_input = await page.query_selector(sel)
                 if file_input:
                     break
 
         if not file_input:
             return FieldResult(label, selector, "file", str(file_path.name), "error",
-                               "Could not find file input element on page")
+                               "Could not locate file input element on page")
 
-        # Use Playwright's set_input_files to upload
         await file_input.set_input_files(str(file_path))
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.8)
 
-        # Verify the file was set
         has_file = await file_input.evaluate("e => e.files && e.files.length > 0")
         if has_file:
             return FieldResult(label, selector, "file", str(file_path.name), "verified",
@@ -1400,6 +1449,45 @@ async def _scroll_to_element(page: Page, el: ElementHandle):
             await el.scroll_into_view_if_needed()
         except Exception:
             pass
+
+
+# ─── Cascade wait ────────────────────────────────────────
+
+async def _wait_for_cascade(page: Page, timeout: float = 5.0) -> None:
+    """After filling a parent select (country/state), wait until dependent
+    options actually load rather than sleeping a fixed amount.
+
+    Polls for a network-idle state or a DOM mutation with new <option> elements,
+    whichever comes first. Falls back to a 2-second cap so we never block forever.
+    """
+    # First: wait for pending XHR/fetch to settle (covers API-backed dropdowns)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=int(timeout * 1000))
+        return
+    except Exception:
+        pass  # Not a network-driven cascade — fall through to DOM polling
+
+    # DOM polling: watch for new <option> or [role="option"] elements appearing
+    deadline = asyncio.get_event_loop().time() + timeout
+    prev_count: int = await page.evaluate("""() => (
+        document.querySelectorAll('option, [role="option"]').length
+    )""")
+
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.25)
+        try:
+            curr_count: int = await page.evaluate("""() => (
+                document.querySelectorAll('option, [role="option"]').length
+            )""")
+            if curr_count > prev_count:
+                # New options appeared — give them a moment to fully render
+                await asyncio.sleep(0.3)
+                return
+        except Exception:
+            break
+
+    # Absolute fallback
+    await asyncio.sleep(1.0)
 
 
 # ─── Dynamic fields ──────────────────────────────────────
@@ -1660,6 +1748,20 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
             ftype = match.get("field_type", "text")
             label = match.get("label", selector)
 
+            # ── Resolve frame context for iframe-embedded fields ────────────
+            # Fields discovered inside an ATS iframe (Workday, Greenhouse …)
+            # carry a frame_url.  We find the matching Playwright Frame so
+            # _find_element can query_selector inside the correct document.
+            # Keyboard / click operations that act at the OS level still use
+            # the top-level page object throughout.
+            frame_url = match.get("frame_url", "")
+            ctx: PageOrFrame = page
+            if frame_url:
+                for _frame in page.frames:
+                    if _frame.url == frame_url:
+                        ctx = _frame
+                        break
+
             try:
                 # ── Human delay between fields ──
                 await asyncio.sleep(_human_delay())
@@ -1667,20 +1769,20 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
                 # ── Handle autocomplete / React Select fields ──
                 if ftype == "autocomplete":
                     # Try to find the input element
-                    el = await _find_element(page, selector, label, ftype)
+                    el = await _find_element(ctx, selector, label, ftype)
                     if el:
                         fr = await _fill_react_select_field(page, el, value, label)
                     else:
-                        fr_rs = await _fill_react_select_by_label(page, label, value)
+                        fr_rs = await _fill_react_select_by_label(ctx, page, label, value)
                         fr = fr_rs or FieldResult(label, selector, "autocomplete", value, "error",
                                                    f"Could not find autocomplete: {label}")
                     field_results.append(fr)
                     if fr.status in ("filled", "verified"):
                         filled += 1
-                        # Cascading wait
+                        # Cascading wait — poll until dependent options appear or timeout
                         label_lower = label.lower()
                         if any(kw in label_lower for kw in ("state", "country", "province", "region")):
-                            await asyncio.sleep(random.uniform(2.0, 3.0))
+                            await _wait_for_cascade(page)
                     else:
                         skipped += 1
                         if fr.error_message:
@@ -1713,7 +1815,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
 
                 # ── Handle file uploads ──
                 if ftype == "file":
-                    el = await _find_element(page, selector, label, ftype)
+                    el = await _find_element(ctx, selector, label, ftype)
                     fr = await _handle_file_upload(page, el, value, label)
                     field_results.append(fr)
                     if fr.status in ("filled", "verified"):
@@ -1726,15 +1828,15 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
                 if ftype == "select":
                     # Check if this is a React Select first
                     if "react-select" in selector or "css-" in selector:
-                        el = await _find_element(page, selector, label, ftype)
+                        el = await _find_element(ctx, selector, label, ftype)
                         if el:
                             fr = await _fill_react_select_field(page, el, value, label)
                         else:
-                            fr_rs = await _fill_react_select_by_label(page, label, value)
+                            fr_rs = await _fill_react_select_by_label(ctx, page, label, value)
                             fr = fr_rs or FieldResult(label, selector, "select", value, "error",
                                                        f"Could not find React Select: {label}")
                     else:
-                        el = await _find_element(page, selector, label, ftype)
+                        el = await _find_element(ctx, selector, label, ftype)
                         if el:
                             tag = await el.evaluate("e => e.tagName.toLowerCase()")
                             if tag == "select":
@@ -1748,7 +1850,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
                                     fr = await _fill_custom_dropdown(page, el, value, label)
                         else:
                             # Try React Select by label as last resort
-                            fr_rs = await _fill_react_select_by_label(page, label, value)
+                            fr_rs = await _fill_react_select_by_label(ctx, page, label, value)
                             fr = fr_rs or FieldResult(label, selector, "select", value, "error",
                                                        f"Could not find: {label}")
 
@@ -1760,7 +1862,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
                         # pause for dependent fields to load their options
                         label_lower = label.lower()
                         if any(kw in label_lower for kw in ("state", "country", "province", "region")):
-                            await asyncio.sleep(random.uniform(2.0, 3.0))
+                            await _wait_for_cascade(page)
                             # Re-dismiss popups in case cascade triggered a reload
                             await _dismiss_popups(page)
                     else:
@@ -1770,11 +1872,11 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
                     continue
 
                 # ── All other field types: find element first ──
-                el = await _find_element(page, selector, label, ftype)
+                el = await _find_element(ctx, selector, label, ftype)
                 if not el:
                     # Last resort: maybe it's a React Select not tagged as select
                     if label:
-                        fr_rs = await _fill_react_select_by_label(page, label, value)
+                        fr_rs = await _fill_react_select_by_label(ctx, page, label, value)
                         if fr_rs and fr_rs.status in ("filled", "verified"):
                             field_results.append(fr_rs)
                             filled += 1
@@ -1799,7 +1901,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
                     if fr.status in ("filled", "verified"):
                         label_lower = label.lower()
                         if any(kw in label_lower for kw in ("state", "country", "province", "region")):
-                            await asyncio.sleep(random.uniform(2.0, 3.0))
+                            await _wait_for_cascade(page)
 
                 elif real_type == "datepicker":
                     fr = await _fill_datepicker(page, el, value, label)

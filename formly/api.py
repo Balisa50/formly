@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from . import db
 from .config import UPLOADS_DIR
@@ -25,6 +25,16 @@ except Exception:
 from .matcher import match_fields, get_unmatched, get_essay_fields, FieldMatch
 from .gap_filler import generate_question, save_answer, try_autofill
 from .essay_writer import write_essay
+
+def _validate_form_url(url: str) -> str:
+    """Reject non-http(s) schemes to prevent file:// / ftp:// SSRF."""
+    if not url:
+        raise ValueError("URL is required")
+    lower = url.lower().strip()
+    if not (lower.startswith("http://") or lower.startswith("https://")):
+        raise ValueError("URL must start with http:// or https://")
+    return url.strip()
+
 
 app = FastAPI(title="Formly", description="Autonomous form filling agent", version="0.1.0")
 
@@ -302,6 +312,11 @@ def delete_skill(id: int):
 class ScanRequest(BaseModel):
     url: str
 
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        return _validate_form_url(v)
+
 
 @app.post("/api/forms/scan")
 def scan_form(req: ScanRequest):
@@ -335,6 +350,11 @@ class MatchRequest(BaseModel):
     url: str
     fields: list[dict]
     page_context: str = ""
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        return _validate_form_url(v)
 
 
 @app.post("/api/forms/match")
@@ -489,6 +509,11 @@ def generate_essay(req: EssayRequest):
 class AgentStartRequest(BaseModel):
     url: str
 
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        return _validate_form_url(v)
+
 
 @app.post("/api/agent/start")
 def agent_start(req: AgentStartRequest):
@@ -507,6 +532,11 @@ class AgentFillRequest(BaseModel):
     url: str
     matches: list[dict]
     gap_answers: dict = {}
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        return _validate_form_url(v)
 
 
 @app.post("/api/agent/fill")
@@ -527,6 +557,11 @@ def agent_fill(req: AgentFillRequest):
 class FillRequest(BaseModel):
     url: str
     matches: list[dict]
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        return _validate_form_url(v)
 
 
 @app.post("/api/forms/fill")
