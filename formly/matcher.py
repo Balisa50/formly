@@ -76,6 +76,9 @@ class FieldMatch:
     confidence: float
     needs_essay: bool = False
     note: str = ""
+    # Non-empty when the field lives inside an <iframe> (its frame URL).
+    # Passed through from FormField so the filler routes to the right frame.
+    frame_url: str = ""
 
 
 # Country codes by nationality (lowercase key)
@@ -181,6 +184,10 @@ def match_fields(fields: list[FormField], page_context: str = "") -> list[FieldM
     """Match form fields to profile data using LLM semantic understanding."""
     profile = db.get_full_profile()
 
+    # Index the original fields by selector so we can recover frame_url after
+    # the LLM returns its response (LLM only sees selector, not frame info).
+    _field_by_selector: dict[str, FormField] = {f.selector: f for f in fields}
+
     # Build the prompt
     fields_desc = []
     for f in fields:
@@ -191,7 +198,9 @@ def match_fields(fields: list[FormField], page_context: str = "") -> list[FieldM
             "required": f.required,
         }
         if f.options:
-            desc["options"] = f.options[:30]  # cap for token limits
+            # Pass the full options list so the LLM can pick the right one.
+            # Hard-cap only to prevent pathological token counts (>200 options is unusual).
+            desc["options"] = f.options[:200]
         if f.max_length:
             desc["max_length"] = f.max_length
         if f.placeholder:
@@ -253,6 +262,10 @@ Match each form field to the appropriate profile data. Return the JSON array."""
             ))
             continue
 
+        # Recover frame_url from the original FormField (not in LLM response)
+        orig_field = _field_by_selector.get(m["selector"])
+        frame_url = orig_field.frame_url if orig_field else ""
+
         matches.append(FieldMatch(
             selector=m["selector"],
             field_type=field_type,
@@ -263,6 +276,7 @@ Match each form field to the appropriate profile data. Return the JSON array."""
             confidence=float(m.get("confidence", 0)) if value else 0,
             needs_essay=bool(m.get("needs_essay", False)),
             note=m.get("note", ""),
+            frame_url=frame_url,
         ))
 
     return matches

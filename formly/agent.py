@@ -143,6 +143,8 @@ def run_agent(url: str) -> list[AgentEvent]:
             "value": m.value,
             "match_type": m.match_type,
             "confidence": m.confidence,
+            # Carry frame_url so the filler routes to the correct iframe frame
+            "frame_url": m.frame_url,
         })
 
     events.append(AgentEvent("ready", f"Ready to fill {len(fill_matches)} fields. {len(gap_questions)} need your input.",
