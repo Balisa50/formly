@@ -5,6 +5,10 @@ services:
     dockerfilePath: ./Dockerfile
     plan: standard
     branch: main
+    disk:
+      name: formly-data
+      mountPath: /app/data
+      sizeGB: 1
     envVars:
       - key: GROQ_API_KEY
         sync: false

@@ -6,7 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Force cache invalidation for source code
-RUN echo "build-v12-iframe-keyboard-fix-url-validation"
+RUN echo "build-v13-persistent-disk-mobile-nav"
 COPY . .
 
 RUN mkdir -p data/uploads

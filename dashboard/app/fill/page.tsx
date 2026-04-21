@@ -300,7 +300,7 @@ export default function FillFormPage() {
   // ---- IDLE: Centered URL Input ----
   if (phase === "idle") {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh]">
+      <div className="flex flex-col items-center min-h-[60vh] pt-6">
         <h1 className="text-3xl font-bold mb-2">Fill a Form</h1>
         <p className="text-text-muted text-sm mb-8 text-center max-w-md">
           Paste any application form URL. The agent reads every field, matches your profile, and fills it for you.
@@ -324,6 +324,52 @@ export default function FillFormPage() {
             </button>
           </div>
           {error && <p className="text-sm text-red mt-3 text-center">{error}</p>}
+        </div>
+
+        {/* How to use */}
+        <div className="mt-12 w-full max-w-2xl">
+          <p className="text-xs text-text-muted uppercase tracking-wider font-medium mb-4 text-center">How it works</p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {[
+              {
+                step: "1",
+                title: "Build your profile",
+                body: "Go to Profile and fill in your details or upload your CV. Formly uses this to answer every field.",
+                href: "/profile",
+                cta: "Go to Profile →",
+              },
+              {
+                step: "2",
+                title: "Paste a form URL",
+                body: "Copy the URL of any job application, grant form, or sign-up page and paste it above.",
+                href: null,
+                cta: null,
+              },
+              {
+                step: "3",
+                title: "Review & submit",
+                body: "The agent fills every field it can. You answer any gaps, review the result, then confirm.",
+                href: null,
+                cta: null,
+              },
+            ].map(({ step, title, body, href, cta }) => (
+              <div key={step} className="bg-surface border border-border rounded-xl p-4">
+                <div className="w-7 h-7 rounded-full bg-accent/10 text-accent text-xs font-bold flex items-center justify-center mb-3">
+                  {step}
+                </div>
+                <p className="text-sm font-semibold mb-1">{title}</p>
+                <p className="text-xs text-text-muted leading-relaxed">{body}</p>
+                {href && cta && (
+                  <a href={href} className="inline-block mt-3 text-xs text-accent hover:text-accent-hover transition-colors">
+                    {cta}
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-text-muted text-center mt-5">
+            Works with Workday, Greenhouse, Lever, Google Forms, Typeform, and most custom forms.
+          </p>
         </div>
       </div>
     );
