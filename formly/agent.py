@@ -192,18 +192,10 @@ def fill_with_answers(url: str, matches: list[dict], gap_answers: dict[str, str]
 
     events.append(AgentEvent("progress", "Agent is filling the form now..."))
 
-    # Report each field being filled
-    for m in matches:
-        if m.get("value"):
-            label = _clean_label(m.get("label", ""))
-            val_preview = str(m["value"])[:40]
-            events.append(AgentEvent("filling", f"Filling {label}...",
-                                     {"label": label, "value": val_preview}))
-
     try:
-        result = fill_form(url, matches)
+        result = fill_form(url, matches, auto_submit=True)
 
-        # Build per-field results for review screen
+        # Build per-field results
         field_details = []
         for fr in (result.field_results or []):
             field_details.append({
@@ -215,19 +207,35 @@ def fill_with_answers(url: str, matches: list[dict], gap_answers: dict[str, str]
                 "error_message": fr.error_message,
             })
 
-        events.append(AgentEvent("screenshot", f"Filled {result.filled} fields, {result.skipped} skipped.",
-                                 {
-                                     "screenshot": result.screenshot_b64,
-                                     "filled": result.filled,
-                                     "skipped": result.skipped,
-                                     "pages": result.pages_navigated,
-                                     "errors": result.errors,
-                                     "field_results": field_details,
-                                 }))
+        # Determine overall outcome
+        captcha_hit = result.captcha_detected
+        submitted = not captcha_hit and result.filled > 0
+
+        summary = (
+            f"Filled {result.filled} fields across {result.pages_navigated} page(s)"
+            + (", submitted successfully." if submitted and not result.errors else
+               " — CAPTCHA detected, submit manually." if captcha_hit else
+               f" — {len(result.errors)} issue(s). Review before submitting.")
+        )
+
+        events.append(AgentEvent(
+            "screenshot",
+            summary,
+            {
+                "screenshot": result.screenshot_b64,
+                "filled": result.filled,
+                "skipped": result.skipped,
+                "pages": result.pages_navigated,
+                "submitted": submitted,
+                "captcha": captcha_hit,
+                "errors": result.errors,
+                "field_results": field_details,
+            },
+        ))
     except Exception as e:
         events.append(AgentEvent("error", f"Fill failed: {str(e)[:200]}"))
 
-    events.append(AgentEvent("done", "Form filling complete."))
+    events.append(AgentEvent("done", "Agent finished."))
     return events
 
 

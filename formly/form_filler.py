@@ -1502,8 +1502,63 @@ async def _check_validation(page: Page) -> list[str]:
 #  MAIN FILL ENGINE
 # ═══════════════════════════════════════════════════════════
 
-async def _fill_form(url: str, matches: list[dict]) -> FillResult:
-    """Navigate to URL and autonomously fill every field with intelligence."""
+async def _click_submit(page: Page) -> bool:
+    """Find and click the submit/apply/finish button. Returns True if clicked."""
+    submit_words = ["submit", "apply", "finish", "complete", "send application",
+                    "send", "continue", "next"]
+    # Try specific selectors first (most reliable)
+    selectors = [
+        'input[type="submit"]',
+        'button[type="submit"]',
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=800):
+                await loc.scroll_into_view_if_needed()
+                await asyncio.sleep(random.uniform(0.4, 0.9))
+                await loc.click()
+                return True
+        except Exception:
+            continue
+
+    # Fallback: find by button text
+    for word in submit_words:
+        for sel in [f'button:has-text("{word}")', f'[role="button"]:has-text("{word}")']:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=500):
+                    await loc.scroll_into_view_if_needed()
+                    await asyncio.sleep(random.uniform(0.4, 0.9))
+                    await loc.click()
+                    return True
+            except Exception:
+                continue
+
+    # Last resort: JS click on any visible submit-like button
+    try:
+        clicked = await page.evaluate("""() => {
+            const words = ['submit','apply','finish','complete','send'];
+            const btns = [...document.querySelectorAll(
+                'button, input[type="submit"], [role="button"]'
+            )];
+            for (const b of btns) {
+                const t = (b.textContent || b.value || '').trim().toLowerCase();
+                if (words.some(w => t.includes(w)) && b.offsetParent !== null) {
+                    b.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        return bool(clicked)
+    except Exception:
+        return False
+
+
+async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) -> FillResult:
+    """Navigate to URL and autonomously fill every field with intelligence.
+    Set auto_submit=True (default) to click the submit button when done."""
     filled = 0
     skipped = 0
     pages = 1
@@ -1540,22 +1595,9 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
         page = await context.new_page()
         await page.goto(url, wait_until="networkidle", timeout=30000)
 
-        # ── Step 0: PREVENT FORM SUBMISSION ──
-        # Intercept ALL form submit events so the agent never accidentally submits
+        # Block Enter key from accidentally submitting mid-fill
+        # (we control submission ourselves via _click_submit)
         await page.evaluate("""() => {
-            document.querySelectorAll('form').forEach(f => {
-                f.addEventListener('submit', e => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    e.stopImmediatePropagation();
-                    return false;
-                }, true);
-            });
-            // Also override .submit() method on all forms
-            document.querySelectorAll('form').forEach(f => {
-                f.submit = () => {};
-            });
-            // Block Enter key from submitting forms
             document.addEventListener('keydown', e => {
                 if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
                     const form = e.target.closest('form');
@@ -1816,20 +1858,36 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
         if validation_errors:
             errors.extend(validation_errors)
 
-        # ── Check for submit button and report (do NOT click) ──
-        has_submit = await page.evaluate("""() => {
-            const btns = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')];
-            const submitWords = ['submit', 'finish', 'complete', 'send', 'apply'];
-            for (const btn of btns) {
-                const text = (btn.textContent || btn.value || '').trim().toLowerCase();
-                if (submitWords.some(w => text.includes(w)) && btn.offsetParent !== null) {
-                    return text;
-                }
-            }
-            return null;
-        }""")
-        if has_submit:
-            errors.append(f"Submit button found ('{has_submit}') -- NOT clicked. Review and submit manually.")
+        # ── Auto-submit ──────────────────────────────────────────────────────
+        submitted = False
+        if auto_submit and not captcha:
+            submitted = await _click_submit(page)
+            if submitted:
+                # Wait for navigation / confirmation page
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10_000)
+                except Exception:
+                    await asyncio.sleep(2)
+
+                # Detect confirmation
+                confirmed = await page.evaluate("""() => {
+                    const body = (document.body.innerText || '').toLowerCase();
+                    const signals = [
+                        'thank you', 'thanks!', 'successfully submitted',
+                        'application received', 'we received', 'you have applied',
+                        'submission received', 'application submitted',
+                        'confirmation', 'you\'re all set', 'we\'ll be in touch',
+                    ];
+                    return signals.some(s => body.includes(s));
+                }""")
+                if confirmed:
+                    errors = [e for e in errors if "submit" not in e.lower()]  # clean up noise
+                else:
+                    errors.append("Form submitted — no confirmation page detected. Verify manually.")
+            else:
+                errors.append("Could not locate the submit button — review and submit manually.")
+        elif captcha:
+            errors.append("CAPTCHA detected — solve it manually, then click Submit.")
 
         # ── Hide overlays, take screenshot ──
         await page.evaluate("""() => {
@@ -1861,6 +1919,7 @@ async def _fill_form(url: str, matches: list[dict]) -> FillResult:
 
 # ─── Public API ──────────────────────────────────────────
 
-def fill_form(url: str, matches: list[dict]) -> FillResult:
-    """Synchronous wrapper -- the main entry point."""
-    return asyncio.run(_fill_form(url, matches))
+def fill_form(url: str, matches: list[dict], auto_submit: bool = True) -> FillResult:
+    """Synchronous wrapper — fill every field and submit the form.
+    Set auto_submit=False only if you want to review before submitting."""
+    return asyncio.run(_fill_form(url, matches, auto_submit=auto_submit))
