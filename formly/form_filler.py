@@ -2456,6 +2456,21 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, pr
         if validation_errors:
             errors.extend(validation_errors)
 
+        # ── Screenshot of filled form (BEFORE submit so user sees filled fields,
+        #    not the post-submission confirmation/JSON page) ─────────────────
+        await page.evaluate("""() => {
+            document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]').forEach(el => {
+                el.style.display = 'none';
+            });
+            document.querySelectorAll('#fixedban, .adsbygoogle, [id*="google_ads"], iframe[src*="googleads"]').forEach(el => {
+                el.style.display = 'none';
+            });
+        }""")
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(0.8)
+        screenshot = await page.screenshot(full_page=True, type="png")
+        screenshot_b64 = base64.b64encode(screenshot).decode()
+
         # ── Auto-submit ──────────────────────────────────────────────────────
         submitted = False
         if auto_submit and not captcha and not otp_detected:
@@ -2479,7 +2494,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, pr
                     return signals.some(s => body.includes(s));
                 }""")
                 if confirmed:
-                    errors = [e for e in errors if "submit" not in e.lower()]  # clean up noise
+                    errors = [e for e in errors if "submit" not in e.lower()]
                 else:
                     errors.append("Form submitted — no confirmation page detected. Verify manually.")
             else:
@@ -2488,21 +2503,6 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, pr
             errors.append("Solve the CAPTCHA manually, then click Submit.")
         elif otp_detected:
             errors.append("Enter the OTP code sent to you, then submit the form manually.")
-
-        # ── Hide overlays, take screenshot ──
-        await page.evaluate("""() => {
-            document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]').forEach(el => {
-                el.style.display = 'none';
-            });
-            document.querySelectorAll('#fixedban, .adsbygoogle, [id*="google_ads"], iframe[src*="googleads"]').forEach(el => {
-                el.style.display = 'none';
-            });
-        }""")
-
-        await page.evaluate("window.scrollTo(0, 0)")
-        await asyncio.sleep(1.5)
-        screenshot = await page.screenshot(full_page=True, type="png")
-        screenshot_b64 = base64.b64encode(screenshot).decode()
 
         await browser.close()
 
