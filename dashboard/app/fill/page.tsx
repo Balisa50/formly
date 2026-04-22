@@ -39,6 +39,7 @@ export default function FillFormPage() {
   // Result
   const [screenshot, setScreenshot] = useState("");
   const [fillStats, setFillStats] = useState<any>(null);
+  const [otpDetected, setOtpDetected] = useState(false);
 
   // Review
   const [reviewFields, setReviewFields] = useState<ReviewField[]>([]);
@@ -216,6 +217,7 @@ export default function FillFormPage() {
         if (event.type === "screenshot" && event.data?.screenshot) {
           setScreenshot(event.data.screenshot);
           setFillStats(event.data);
+          setOtpDetected(!!event.data.otp);
           latestStats = event.data;
         }
       }
@@ -292,6 +294,7 @@ export default function FillFormPage() {
     setEssayDrafts([]);
     setScreenshot("");
     setFillStats(null);
+    setOtpDetected(false);
     setError("");
     setReviewFields([]);
     setIsRefilling(false);
@@ -507,6 +510,21 @@ export default function FillFormPage() {
               </div>
             )}
 
+            {/* OTP Banner */}
+            {otpDetected && phase === "review" && (
+              <div className="bg-amber-400/10 border border-amber-400/30 rounded-xl p-4 flex gap-3 items-start">
+                <svg className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+                <div>
+                  <p className="text-sm font-semibold text-amber-400">OTP / Verification code required</p>
+                  <p className="text-xs text-amber-300/80 mt-0.5">
+                    The form sent a verification code to your email or phone. Open the form in a browser, enter the code, and submit manually.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Done state */}
             {phase === "done" && (
               <div className="bg-surface rounded-xl border border-border p-6 text-center">
@@ -604,60 +622,132 @@ export default function FillFormPage() {
               </p>
             </div>
 
-            {gapQuestions[gapIndex].field_type?.includes("file") ? (
-              <div className="space-y-2">
-                <label className="flex flex-col items-center justify-center w-full h-20 border-2 border-dashed border-border rounded-xl cursor-pointer hover:border-accent/50 hover:bg-accent/5 transition-colors">
-                  <svg className="w-6 h-6 text-text-muted mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-                  </svg>
-                  <span className="text-xs text-text-muted">Click to upload</span>
-                  <input type="file" className="hidden"
-                    accept={gapQuestions[gapIndex].field_type?.includes("photo") ? "image/*" : "*"}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      addLog({ type: "progress", message: `Uploaded: ${file.name}` });
-                      const formData = new FormData();
-                      formData.append("file", file);
-                      const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-                      fetch(`${BASE}/api/profile/photo`, { method: "POST", body: formData }).catch(() => {});
-                      const newAnswers = { ...gapAnswers, [gapQuestions[gapIndex].selector]: file.name };
-                      setGapAnswers(newAnswers);
+            {(() => {
+              const q = gapQuestions[gapIndex];
+              const opts: string[] = Array.isArray(q.options) ? q.options : [];
+              const isFile = q.field_type?.includes("file");
+              const isCheckbox = q.field_type === "checkbox";
+              const isChoice = !isCheckbox && opts.length > 0 && (
+                q.field_type === "radio" || q.field_type === "select" ||
+                q.field_type === "native_select" || q.field_type === "autocomplete"
+              );
+
+              if (isFile) {
+                return (
+                  <div className="space-y-2">
+                    <label className="flex flex-col items-center justify-center w-full h-20 border-2 border-dashed border-border rounded-xl cursor-pointer hover:border-accent/50 hover:bg-accent/5 transition-colors">
+                      <svg className="w-6 h-6 text-text-muted mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                      </svg>
+                      <span className="text-xs text-text-muted">Click to upload</span>
+                      <input type="file" className="hidden"
+                        accept={q.field_type?.includes("photo") ? "image/*" : "*"}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          addLog({ type: "progress", message: `Uploaded: ${file.name}` });
+                          const formData = new FormData();
+                          formData.append("file", file);
+                          const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+                          fetch(`${BASE}/api/profile/photo`, { method: "POST", body: formData }).catch(() => {});
+                          const newAnswers = { ...gapAnswers, [q.selector]: file.name };
+                          setGapAnswers(newAnswers);
+                          const nextIdx = gapIndex + 1;
+                          setGapIndex(nextIdx);
+                          if (nextIdx >= gapQuestions.length) {
+                            addLog({ type: "progress", message: "All questions answered. Filling the form now..." });
+                            doFill(agentUrl, [...fillMatches], newAnswers);
+                          }
+                        }}
+                      />
+                    </label>
+                    <button onClick={() => {
                       const nextIdx = gapIndex + 1;
                       setGapIndex(nextIdx);
-                      if (nextIdx >= gapQuestions.length) {
-                        addLog({ type: "progress", message: "All questions answered. Filling the form now..." });
-                        doFill(agentUrl, [...fillMatches], newAnswers);
-                      }
-                    }}
+                      addLog({ type: "progress", message: `Skipped ${q.label}.` });
+                      if (nextIdx >= gapQuestions.length) doFill(agentUrl, [...fillMatches], gapAnswers);
+                    }} className="text-xs text-text-muted hover:text-text-secondary">
+                      Skip this upload
+                    </button>
+                  </div>
+                );
+              }
+
+              if (isCheckbox && opts.length > 0) {
+                // Multi-select checkboxes
+                const checked: string[] = userInput ? userInput.split(",").map(s => s.trim()).filter(Boolean) : [];
+                const toggle = (opt: string) => {
+                  const next = checked.includes(opt)
+                    ? checked.filter(c => c !== opt)
+                    : [...checked, opt];
+                  setUserInput(next.join(", "));
+                };
+                return (
+                  <div className="space-y-2">
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                      {opts.map((opt) => (
+                        <label key={opt} className="flex items-center gap-2 cursor-pointer group">
+                          <input
+                            type="checkbox"
+                            checked={checked.includes(opt)}
+                            onChange={() => toggle(opt)}
+                            className="accent-accent w-3.5 h-3.5"
+                          />
+                          <span className="text-xs text-text-secondary group-hover:text-text-primary transition-colors">{opt}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <button
+                      onClick={handleGapAnswer}
+                      disabled={!userInput.trim()}
+                      className="w-full bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-xs px-3 py-1.5 rounded-lg transition-colors"
+                    >
+                      Confirm selection
+                    </button>
+                  </div>
+                );
+              }
+
+              if (isChoice) {
+                // Single-select dropdown
+                return (
+                  <div className="flex gap-2">
+                    <select
+                      className="flex-1 bg-background border border-border rounded-lg px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent transition-colors"
+                      value={userInput}
+                      onChange={(e) => setUserInput(e.target.value)}
+                    >
+                      <option value="">Pick one…</option>
+                      {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                    <button
+                      onClick={handleGapAnswer}
+                      disabled={!userInput.trim()}
+                      className="bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-xs px-3 py-1.5 rounded-lg transition-colors"
+                    >
+                      Send
+                    </button>
+                  </div>
+                );
+              }
+
+              // Default: free text
+              return (
+                <div className="flex gap-2">
+                  <input
+                    className="input flex-1 !text-xs"
+                    placeholder="Type your answer..."
+                    value={userInput}
+                    onChange={(e) => setUserInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleGapAnswer()}
+                    autoFocus
                   />
-                </label>
-                <button onClick={() => {
-                  const nextIdx = gapIndex + 1;
-                  setGapIndex(nextIdx);
-                  addLog({ type: "progress", message: `Skipped ${gapQuestions[gapIndex].label}.` });
-                  if (nextIdx >= gapQuestions.length) {
-                    doFill(agentUrl, [...fillMatches], gapAnswers);
-                  }
-                }} className="text-xs text-text-muted hover:text-text-secondary">
-                  Skip this upload
-                </button>
-              </div>
-            ) : (
-              <div className="flex gap-2">
-                <input
-                  className="input flex-1 !text-xs"
-                  placeholder="Type your answer..."
-                  value={userInput}
-                  onChange={(e) => setUserInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleGapAnswer()}
-                  autoFocus
-                />
-                <button onClick={handleGapAnswer} className="bg-accent text-white text-xs px-3 py-1.5 rounded-lg">
-                  Send
-                </button>
-              </div>
-            )}
+                  <button onClick={handleGapAnswer} className="bg-accent text-white text-xs px-3 py-1.5 rounded-lg">
+                    Send
+                  </button>
+                </div>
+              );
+            })()}
             <button onClick={handleSkipAndFill} className="text-xs text-text-muted hover:text-text-secondary block">
               Skip remaining and fill
             </button>

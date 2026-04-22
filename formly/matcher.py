@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dc_field
 from datetime import datetime
 
 from .form_reader import FormField
@@ -79,6 +79,8 @@ class FieldMatch:
     # Non-empty when the field lives inside an <iframe> (its frame URL).
     # Passed through from FormField so the filler routes to the right frame.
     frame_url: str = ""
+    # Original options from the FormField (for select/radio/checkbox gap questions)
+    options: list[str] = dc_field(default_factory=list)
 
 
 # Country codes by nationality (lowercase key)
@@ -262,9 +264,26 @@ Match each form field to the appropriate profile data. Return the JSON array."""
             ))
             continue
 
-        # Recover frame_url from the original FormField (not in LLM response)
+        # Recover frame_url and options from the original FormField (not in LLM response)
         orig_field = _field_by_selector.get(m["selector"])
         frame_url = orig_field.frame_url if orig_field else ""
+        options = list(orig_field.options) if orig_field and orig_field.options else []
+
+        # ANTI-HALLUCINATION: for selection fields that have a real options list,
+        # validate the LLM's chosen value actually exists in that list.
+        # If it doesn't, null it out so the gap-filler or user prompt takes over.
+        if value and options and field_type in ("select", "radio", "checkbox", "autocomplete", "native_select"):
+            opts_lower = [o.lower().strip() for o in options]
+            val_lower = value.lower().strip()
+            matched_opt = next(
+                (options[i] for i, ol in enumerate(opts_lower)
+                 if val_lower == ol or val_lower in ol or ol in val_lower),
+                None,
+            )
+            if matched_opt:
+                value = matched_opt   # normalise to exact option text
+            else:
+                value = None          # hallucinated option — ask user instead
 
         matches.append(FieldMatch(
             selector=m["selector"],
@@ -277,6 +296,7 @@ Match each form field to the appropriate profile data. Return the JSON array."""
             needs_essay=bool(m.get("needs_essay", False)),
             note=m.get("note", ""),
             frame_url=frame_url,
+            options=options,
         ))
 
     return matches

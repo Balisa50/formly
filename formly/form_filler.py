@@ -45,6 +45,8 @@ class FillResult:
     screenshot_b64: str
     errors: list[str] = field(default_factory=list)
     captcha_detected: bool = False
+    otp_detected: bool = False
+    login_wall: bool = False
     field_results: list[FieldResult] = field(default_factory=list)
 
 
@@ -461,10 +463,359 @@ async def _detect_field_type(page: Page, el: ElementHandle, declared_type: str,
         return "phone"
 
     if tag == "textarea":
+        # Check if this textarea is backing a rich text editor (hidden element)
+        is_hidden_backing = await el.evaluate("""e => {
+            const s = window.getComputedStyle(e);
+            const hidden = s.display === 'none' || s.visibility === 'hidden'
+                           || e.offsetHeight === 0 || e.offsetWidth === 0;
+            if (!hidden) return false;
+            // Confirm a rich editor is present on the page
+            return !!(
+                document.querySelector('.ql-editor, .tox-edit-area, iframe[id$="_ifr"], ' +
+                    '.ck-editor__editable, trix-editor, .ProseMirror')
+            );
+        }""")
+        if is_hidden_backing:
+            return "rich_text"
         return "textarea"
+
+    # Check for Google Places address autocomplete
+    if tag == "input" and itype in ("text", "search", ""):
+        label_lower_check = (label or "").lower()
+        if any(kw in label_lower_check for kw in ("address", "street", "location", "city", "place")):
+            has_places = await page.evaluate("() => !!(window.google && window.google.maps && window.google.maps.places)")
+            if has_places:
+                return "google_places"
 
     # Default text
     return declared_type if declared_type in ("text", "email", "tel", "number") else "text"
+
+
+# ═══════════════════════════════════════════════════════════
+#  GOOGLE PLACES AUTOCOMPLETE
+# ═══════════════════════════════════════════════════════════
+
+async def _handle_google_places_suggestion(page: Page) -> bool:
+    """If a Google Places pac-container appeared, click the first suggestion.
+    Called transparently after typing into any text field.
+    Returns True if a suggestion was clicked."""
+    try:
+        clicked = await page.evaluate("""() => {
+            const container = document.querySelector('.pac-container');
+            if (!container) return false;
+            const style = window.getComputedStyle(container);
+            if (style.display === 'none' || style.visibility === 'hidden'
+                || container.offsetHeight === 0) return false;
+            const first = container.querySelector('.pac-item');
+            if (!first || first.offsetParent === null) return false;
+            // pac-container responds to mousedown, not click
+            first.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+            first.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true }));
+            first.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true }));
+            return true;
+        }""")
+        if clicked:
+            await asyncio.sleep(0.8)  # let address fields auto-populate
+        return bool(clicked)
+    except Exception:
+        return False
+
+
+# ═══════════════════════════════════════════════════════════
+#  RICH TEXT EDITOR FILLING
+# ═══════════════════════════════════════════════════════════
+
+async def _fill_rich_text(page: Page, el: ElementHandle, value: str, label: str) -> FieldResult:
+    """Fill any rich text editor: Quill, TinyMCE, CKEditor 4/5, Draft.js, Trix,
+    ProseMirror, or plain contenteditable. Tries each engine's native JS API
+    so the editor's internal state is updated correctly (not just the DOM)."""
+    selector = await _get_selector(el)
+
+    # ── 1. Quill ──────────────────────────────────────────
+    try:
+        set_ok = await page.evaluate("""(text) => {
+            const editor = document.querySelector('.ql-editor');
+            if (!editor) return false;
+            // Prefer Quill API (persists to hidden input)
+            const container = editor.closest('.ql-container');
+            if (container && container.__quill) {
+                container.__quill.setText(text + '\\n');
+                return true;
+            }
+            // Direct contenteditable injection
+            editor.innerHTML = '<p>' + text.replace(/\\n/g, '</p><p>') + '</p>';
+            editor.dispatchEvent(new Event('input',  { bubbles: true }));
+            editor.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+        }""", value)
+        if set_ok:
+            return FieldResult(label, selector, "rich_text", value, "filled")
+    except Exception:
+        pass
+
+    # ── 2. TinyMCE ────────────────────────────────────────
+    try:
+        set_ok = await page.evaluate("""(text) => {
+            if (!window.tinymce) return false;
+            const eds = tinymce.editors;
+            if (!eds || eds.length === 0) return false;
+            eds[0].setContent('<p>' + text.replace(/\\n/g, '</p><p>') + '</p>');
+            eds[0].fire('change');
+            return true;
+        }""", value)
+        if set_ok:
+            return FieldResult(label, selector, "rich_text", value, "filled")
+    except Exception:
+        pass
+
+    # ── 3. CKEditor 5 ─────────────────────────────────────
+    try:
+        set_ok = await page.evaluate("""(text) => {
+            // CKEditor 5 stores the instance on the DOM element
+            const editable = document.querySelector('.ck-editor__editable[contenteditable="true"]');
+            if (!editable) return false;
+            const ckInstance = editable.ckeditorInstance;
+            if (ckInstance) {
+                ckInstance.setData('<p>' + text + '</p>');
+                return true;
+            }
+            // Fallback: execCommand
+            editable.focus();
+            document.execCommand('selectAll');
+            document.execCommand('insertText', false, text);
+            return true;
+        }""", value)
+        if set_ok:
+            return FieldResult(label, selector, "rich_text", value, "filled")
+    except Exception:
+        pass
+
+    # ── 4. CKEditor 4 ─────────────────────────────────────
+    try:
+        set_ok = await page.evaluate("""(text) => {
+            if (!window.CKEDITOR) return false;
+            for (const id in CKEDITOR.instances) {
+                CKEDITOR.instances[id].setData('<p>' + text + '</p>');
+                return true;
+            }
+            return false;
+        }""", value)
+        if set_ok:
+            return FieldResult(label, selector, "rich_text", value, "filled")
+    except Exception:
+        pass
+
+    # ── 5. Trix (Basecamp/HEY) ────────────────────────────
+    try:
+        set_ok = await page.evaluate("""(text) => {
+            const trix = document.querySelector('trix-editor');
+            if (!trix || !trix.editor) return false;
+            trix.editor.loadHTML('<p>' + text + '</p>');
+            return true;
+        }""", value)
+        if set_ok:
+            return FieldResult(label, selector, "rich_text", value, "filled")
+    except Exception:
+        pass
+
+    # ── 6. ProseMirror / Draft.js / generic contenteditable ──
+    try:
+        ce_handle = await page.evaluate_handle("""() =>
+            document.querySelector(
+                '.ProseMirror[contenteditable="true"], ' +
+                'div[contenteditable="true"][data-block="true"], ' +
+                'div[contenteditable="true"][class*="editor"], ' +
+                'div[contenteditable="true"][class*="input"]'
+            )
+        """)
+        ce = ce_handle.as_element()
+        if ce:
+            await ce.scroll_into_view_if_needed()
+            await ce.click()
+            await asyncio.sleep(0.3)
+            await page.keyboard.press("Control+a")
+            await asyncio.sleep(0.1)
+            for char in value:
+                await page.keyboard.type(char, delay=_typing_delay())
+            await asyncio.sleep(0.3)
+            return FieldResult(label, selector, "rich_text", value, "filled")
+    except Exception:
+        pass
+
+    # ── 7. Last resort: click the textarea itself and type ─
+    try:
+        await el.scroll_into_view_if_needed()
+        await el.click()
+        await asyncio.sleep(0.2)
+        await page.keyboard.press("Control+a")
+        await asyncio.sleep(0.1)
+        for char in value:
+            await page.keyboard.type(char, delay=_typing_delay())
+        return FieldResult(label, selector, "rich_text", value, "filled")
+    except Exception as exc:
+        return FieldResult(label, selector, "rich_text", value, "error", str(exc)[:120])
+
+
+# ═══════════════════════════════════════════════════════════
+#  CONDITIONAL FIELD DETECTION
+# ═══════════════════════════════════════════════════════════
+
+# Flat keyword → profile key mapping for fast lookup without LLM
+_LABEL_TO_PROFILE_KEYS: list[tuple[tuple[str, ...], list[str]]] = [
+    (("first name", "given name", "firstname"),         ["first_name"]),
+    (("last name", "surname", "family name"),           ["last_name"]),
+    (("full name", "your name", "applicant name"),      ["full_name", "first_name"]),
+    (("email", "e-mail", "email address"),              ["email"]),
+    (("phone", "mobile", "telephone", "cell"),          ["phone", "phone_number"]),
+    (("address", "street address", "street"),           ["address"]),
+    (("city", "town", "municipality"),                  ["city"]),
+    (("state", "province", "county"),                   ["state", "province"]),
+    (("country",),                                      ["country", "nationality"]),
+    (("zip", "postal code", "postcode"),                ["postal_code", "zip_code"]),
+    (("nationality", "citizenship"),                    ["nationality"]),
+    (("gender", "sex"),                                 ["gender"]),
+    (("date of birth", "dob", "birthday", "birth date"),["date_of_birth", "dob"]),
+    (("linkedin",),                                     ["linkedin", "linkedin_url"]),
+    (("website", "portfolio", "personal site"),         ["website", "portfolio_url"]),
+    (("university", "institution", "school", "college"),["university", "institution"]),
+    (("degree", "qualification", "highest education"),  ["degree"]),
+    (("gpa", "cgpa", "grade point"),                    ["gpa", "cgpa"]),
+    (("company", "employer", "current employer"),       ["company", "current_company"]),
+    (("job title", "position", "current role", "title"),["current_title", "job_title", "title"]),
+    (("years of experience", "experience (years)"),     ["years_experience"]),
+    (("bio", "about me", "about yourself", "summary"),  ["bio", "summary", "about_me"]),
+    (("cover letter", "motivation", "why do you want"), ["cover_letter"]),
+    (("skills",),                                       ["skills"]),
+    (("nationality",),                                  ["nationality"]),
+]
+
+
+def _quick_profile_match(
+    label: str,
+    field_type: str,
+    options: list[str],
+    profile: dict,
+) -> str | None:
+    """Fast keyword-based profile lookup for conditional fields — no LLM needed.
+    Works for the common fields that appear after conditional logic fires."""
+    if not profile or not label:
+        return None
+
+    label_lower = label.lower().strip()
+
+    for keywords, profile_keys in _LABEL_TO_PROFILE_KEYS:
+        if any(kw in label_lower for kw in keywords):
+            for key in profile_keys:
+                val = (
+                    profile.get("personal", {}).get(key)
+                    or profile.get(key)
+                )
+                if val and isinstance(val, str) and val.strip():
+                    raw = val.strip()
+                    # For choice fields, validate against available options
+                    if options and field_type in ("select", "radio", "native_select", "autocomplete"):
+                        opts_lower = [o.lower() for o in options]
+                        raw_lower  = raw.lower()
+                        match = next(
+                            (o for o, ol in zip(options, opts_lower)
+                             if raw_lower in ol or ol in raw_lower),
+                            None,
+                        )
+                        if match:
+                            return match
+                        continue  # try next profile key
+                    return raw
+
+    # For small-option select/radio, cross-check every profile string
+    if field_type in ("select", "radio", "native_select") and options and len(options) <= 15:
+        for val in profile.values():
+            if not isinstance(val, str):
+                continue
+            vl = val.lower().strip()
+            for opt in options:
+                if vl in opt.lower() or opt.lower() in vl:
+                    return opt
+
+    return None
+
+
+async def _scan_and_fill_new_fields(
+    page: Page,
+    seen_selectors: set[str],
+    profile: dict,
+    errors: list[str],
+    field_results: list[FieldResult],
+) -> tuple[int, int]:
+    """Re-scan for fields that appeared after previous fills (conditional logic).
+    Matches new fields against the profile without LLM and fills them.
+    Returns (newly_filled, newly_skipped)."""
+    from .form_reader import _FIELD_EXTRACTION_JS, _postprocess_fields  # no circular dep
+
+    try:
+        new_data = await page.evaluate(_FIELD_EXTRACTION_JS)
+    except Exception:
+        return 0, 0
+
+    new_fields = _postprocess_fields(new_data, "")
+    filled = skipped = 0
+
+    for ff in new_fields:
+        if not ff.selector or ff.selector in seen_selectors:
+            continue
+        seen_selectors.add(ff.selector)
+
+        value = _quick_profile_match(ff.label, ff.field_type, ff.options, profile)
+        if not value:
+            skipped += 1
+            continue
+
+        el = await _find_element(page, ff.selector, ff.label, ff.field_type)
+        if not el:
+            skipped += 1
+            continue
+
+        await asyncio.sleep(_human_delay())
+        real_type = await _detect_field_type(page, el, ff.field_type, ff.label)
+        fr = await _dispatch_fill(page, el, value, ff.label, real_type, ff.options)
+        field_results.append(fr)
+
+        if fr.status in ("filled", "verified"):
+            filled += 1
+        else:
+            skipped += 1
+            if fr.error_message:
+                errors.append(fr.error_message)
+
+    return filled, skipped
+
+
+async def _dispatch_fill(
+    page: Page,
+    el: ElementHandle,
+    value: str,
+    label: str,
+    real_type: str,
+    options: list[str] | None = None,
+) -> FieldResult:
+    """Route to the right fill handler based on detected field type."""
+    if real_type == "react_select":
+        return await _fill_react_select_field(page, el, value, label)
+    if real_type == "datepicker":
+        return await _fill_datepicker(page, el, value, label)
+    if real_type == "date_native":
+        return await _fill_date_native(page, el, value, label)
+    if real_type == "date_text":
+        return await _fill_datepicker(page, el, value, label)
+    if real_type == "phone":
+        return await _fill_phone(page, el, value, label)
+    if real_type == "native_select":
+        return await _fill_native_select(page, el, value, label)
+    if real_type == "file":
+        return await _handle_file_upload(page, el, value, label)
+    if real_type == "rich_text":
+        return await _fill_rich_text(page, el, value, label)
+    # default: text / email / number / textarea
+    return await _fill_text(page, el, value, label)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -491,10 +842,15 @@ async def _fill_text(page: Page, el: ElementHandle, value: str, label: str) -> F
         for char in value:
             await page.keyboard.type(char, delay=_typing_delay())
 
-        # Click body to blur (safer than Tab which can reach Submit button)
-        await asyncio.sleep(0.2)
-        await page.click("body", position={"x": 5, "y": 5}, no_wait_after=True)
-        await asyncio.sleep(0.3)
+        # If Google Places dropdown appeared, click first suggestion before blurring
+        await asyncio.sleep(0.4)
+        places_clicked = await _handle_google_places_suggestion(page)
+
+        if not places_clicked:
+            # Click body to blur (safer than Tab which can reach Submit button)
+            await asyncio.sleep(0.2)
+            await page.click("body", position={"x": 5, "y": 5}, no_wait_after=True)
+            await asyncio.sleep(0.3)
 
         # Verify
         ok, err = await _verify_field(page, el, value, label)
@@ -1497,72 +1853,139 @@ async def _handle_dynamic_fields(page: Page):
     await asyncio.sleep(0.3)
 
 
-# ─── Multi-page navigation ──────────────────────────────
+# ─── Multi-page navigation (vision-guided) ──────────────
 
-async def _navigate_pages(page: Page, matches: list[dict]) -> int:
-    """Detect and handle multi-page forms. Does NOT click submit.
+_NEXT_SAFE_WORDS = [
+    "next", "continue", "proceed", "forward",
+    "siguiente", "suivant", "weiter",
+    "next step", "next page", "go to next",
+    "save and continue", "save & continue",
+]
+_DANGER_NAV_WORDS = [
+    "submit", "send", "apply", "finish", "complete", "confirm",
+    "register", "sign up", "signup", "create", "pay", "order",
+    "checkout", "check out", "place order", "subscribe", "donate",
+    "purchase", "buy", "enroll", "enrol", "book now", "reserve",
+]
 
-    SAFETY: Only clicks buttons whose trimmed text EXACTLY matches a known
-    navigation word.  Never clicks anything that looks like a submit,
-    payment, or sign-up button — even if it also contains a nav word."""
+
+async def _click_safe_next(page: Page) -> bool:
+    """Click the first safe Next/Continue button. Never clicks Submit-like buttons."""
+    return bool(await page.evaluate("""(safeWords, dangerWords) => {
+        const btns = [...document.querySelectorAll(
+            'button, input[type="button"], a[role="button"], [role="button"]'
+        )];
+        for (const btn of btns) {
+            if (btn.offsetParent === null) continue;
+            const raw = (btn.textContent || btn.getAttribute('value') || '').trim();
+            const text = raw.toLowerCase();
+            if (dangerWords.some(w => text.includes(w))) continue;
+            const cls = (btn.className || '').toLowerCase();
+            if (['btn-submit','btn-danger','btn-primary','submit'].some(c => cls.includes(c))) continue;
+            if (safeWords.includes(text)) { btn.click(); return true; }
+        }
+        return false;
+    }""", _NEXT_SAFE_WORDS, _DANGER_NAV_WORDS))
+
+
+async def _navigate_and_fill(
+    page: Page,
+    seen_selectors: set[str],
+    profile: dict,
+    errors: list[str],
+    field_results: list[FieldResult],
+    max_pages: int = 15,
+) -> tuple[int, int, int, bool, bool]:
+    """Navigate multi-page forms page-by-page, re-filling new fields each time.
+
+    Also detects OTP prompts and login walls mid-form so the caller can
+    surface them to the user instead of silently failing.
+
+    Returns: (pages_navigated, extra_filled, extra_skipped, captcha, otp_detected)
+    """
+    try:
+        from .vision_agent import detect_otp_field, detect_login_form, fill_login
+        _vision_ok = True
+    except Exception:
+        _vision_ok = False
+
     pages = 1
-    max_pages = 10
+    extra_filled = 0
+    extra_skipped = 0
 
-    while pages < max_pages:
-        next_clicked = await page.evaluate("""() => {
-            const btns = [...document.querySelectorAll('button, input[type="submit"], a.btn, [role="button"], a[class*="btn"]')];
+    for _ in range(max_pages - 1):
+        await asyncio.sleep(0.5)
 
-            /* ── Dangerous words: NEVER click any button containing these ── */
-            const dangerWords = [
-                'submit', 'send', 'apply', 'finish', 'complete', 'confirm',
-                'register', 'sign up', 'signup', 'create', 'pay', 'order',
-                'checkout', 'check out', 'place order', 'subscribe', 'donate',
-                'purchase', 'buy', 'enroll', 'enrol', 'book now', 'reserve'
-            ];
-
-            /* ── Safe navigation words: the button text must EXACTLY match ── */
-            const safeExact = ['next', 'continue', 'proceed', 'forward',
-                               'siguiente', 'suivant', 'weiter',
-                               'next step', 'next page', 'go to next'];
-
-            /* ── Dangerous CSS classes on the button itself ── */
-            const dangerClasses = ['primary', 'danger', 'success', 'btn-submit',
-                                   'btn-danger', 'btn-primary', 'submit'];
-
-            for (const btn of btns) {
-                const raw = (btn.textContent || btn.value || '').trim();
-                const text = raw.toLowerCase();
-
-                /* Skip anything with a dangerous word anywhere in its text */
-                if (dangerWords.some(w => text.includes(w))) continue;
-
-                /* Skip input[type="submit"] outright */
-                if (btn.tagName === 'INPUT' && (btn.type || '').toLowerCase() === 'submit') continue;
-
-                /* Skip buttons styled as primary / danger / success */
-                const cls = (btn.className || '').toLowerCase();
-                if (dangerClasses.some(c => cls.includes(c))) continue;
-
-                /* Only click if the EXACT trimmed text matches a safe word */
-                if (safeExact.includes(text) && btn.offsetParent !== null) {
-                    btn.click();
-                    return 'clicked';
-                }
-            }
-            return 'none';
-        }""")
-
-        if next_clicked == "clicked":
-            await asyncio.sleep(2)
+        # ── OTP wall check ──────────────────────────────────────────
+        if _vision_ok:
             try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
+                if await detect_otp_field(page):
+                    return pages, extra_filled, extra_skipped, False, True
             except Exception:
                 pass
-            pages += 1
-            await _dismiss_popups(page)
-        else:
-            break
 
+        # ── Login wall check ────────────────────────────────────────
+        if _vision_ok and profile:
+            try:
+                if await detect_login_form(page):
+                    email = (
+                        profile.get("personal", {}).get("email") or
+                        profile.get("email") or ""
+                    )
+                    password = (
+                        profile.get("personal", {}).get("password") or
+                        profile.get("password") or ""
+                    )
+                    if email and password:
+                        await fill_login(page, email, password)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=8_000)
+                        except Exception:
+                            pass
+                        await _dismiss_popups(page)
+                        pages += 1
+                        continue
+            except Exception:
+                pass
+
+        # ── CAPTCHA check ───────────────────────────────────────────
+        if await _check_captcha(page):
+            return pages, extra_filled, extra_skipped, True, False
+
+        # ── Try to click a safe Next/Continue button ────────────────
+        clicked = await _click_safe_next(page)
+        if not clicked:
+            break   # no more pages to navigate
+
+        await asyncio.sleep(2)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10_000)
+        except Exception:
+            pass
+        pages += 1
+        await _dismiss_popups(page)
+
+        # ── Re-scan and fill new fields on this page ────────────────
+        cf_filled, cf_skipped = await _scan_and_fill_new_fields(
+            page, seen_selectors, profile, errors, field_results
+        )
+        extra_filled += cf_filled
+        extra_skipped += cf_skipped
+
+        # ── Post-fill OTP check ────────────────────────────────────
+        if _vision_ok:
+            try:
+                if await detect_otp_field(page):
+                    return pages, extra_filled, extra_skipped, False, True
+            except Exception:
+                pass
+
+    return pages, extra_filled, extra_skipped, False, False
+
+
+# kept for backward-compat (nothing external calls it, but just in case)
+async def _navigate_pages(page: Page, matches: list[dict]) -> int:
+    pages, _, _, _, _ = await _navigate_and_fill(page, set(), {}, [], [])
     return pages
 
 
@@ -1644,7 +2067,7 @@ async def _click_submit(page: Page) -> bool:
         return False
 
 
-async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) -> FillResult:
+async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, profile: dict | None = None) -> FillResult:
     """Navigate to URL and autonomously fill every field with intelligence.
     Set auto_submit=True (default) to click the submit button when done."""
     filled = 0
@@ -1738,6 +2161,9 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
              if m.get("value") and m.get("match_type") != "skipped"],
             key=_fill_priority,
         )
+
+        # Track selectors we've already processed (for conditional field scanning)
+        seen_selectors: set[str] = {m["selector"] for m in sorted_matches if m.get("selector")}
 
         # Track which "parent" selects have been filled (for cascading)
         filled_selects: list[str] = []
@@ -1922,6 +2348,12 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
                 elif real_type == "file":
                     fr = await _handle_file_upload(page, el, value, label)
 
+                elif real_type == "rich_text":
+                    fr = await _fill_rich_text(page, el, value, label)
+
+                elif real_type == "google_places":
+                    fr = await _fill_text(page, el, value, label)  # typing triggers Places API
+
                 elif real_type in ("text", "email", "number", "textarea"):
                     fr = await _fill_text(page, el, value, label)
 
@@ -1941,19 +2373,50 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
 
                 await _handle_dynamic_fields(page)
 
+                # ── Conditional field scan ───────────────────────────────────
+                # After filling a select/radio/checkbox (fields most likely to
+                # trigger conditional logic), re-scan for newly revealed fields.
+                if profile and real_type in (
+                    "native_select", "react_select", "radio", "checkbox",
+                    "select", "autocomplete",
+                ):
+                    cf_filled, cf_skipped = await _scan_and_fill_new_fields(
+                        page, seen_selectors, profile, errors, field_results
+                    )
+                    filled  += cf_filled
+                    skipped += cf_skipped
+
             except Exception as e:
                 fr = FieldResult(label, selector, ftype, value, "error", str(e)[:120])
                 field_results.append(fr)
                 skipped += 1
                 errors.append(f"{label}: {str(e)[:120]}")
 
-        # ── Handle multi-page forms ──
-        pages = await _navigate_pages(page, sorted_matches)
+        # ── Final conditional scan — catch anything triggered by the last field ──
+        if profile:
+            cf_filled, cf_skipped = await _scan_and_fill_new_fields(
+                page, seen_selectors, profile, errors, field_results
+            )
+            filled  += cf_filled
+            skipped += cf_skipped
 
-        # ── CAPTCHA check ──
-        captcha = await _check_captcha(page)
+        # ── Multi-page navigation + per-page fill + OTP/login detection ──
+        nav_pages, nav_filled, nav_skipped, captcha, otp_detected = await _navigate_and_fill(
+            page, seen_selectors, profile or {}, errors, field_results
+        )
+        pages   = nav_pages
+        filled  += nav_filled
+        skipped += nav_skipped
+
+        # ── Final CAPTCHA check (in case it appeared on the last page) ──
+        if not captcha:
+            captcha = await _check_captcha(page)
+
         if captcha:
-            errors.append("CAPTCHA detected on the form -- you'll need to solve it manually")
+            errors.append("CAPTCHA detected — solve it manually, then click Submit.")
+
+        if otp_detected:
+            errors.append("OTP / verification code required — check your email or phone and enter the code.")
 
         # ── Validation check ──
         validation_errors = await _check_validation(page)
@@ -1962,7 +2425,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
 
         # ── Auto-submit ──────────────────────────────────────────────────────
         submitted = False
-        if auto_submit and not captcha:
+        if auto_submit and not captcha and not otp_detected:
             submitted = await _click_submit(page)
             if submitted:
                 # Wait for navigation / confirmation page
@@ -1978,7 +2441,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
                         'thank you', 'thanks!', 'successfully submitted',
                         'application received', 'we received', 'you have applied',
                         'submission received', 'application submitted',
-                        'confirmation', 'you\'re all set', 'we\'ll be in touch',
+                        'confirmation', "you're all set", "we'll be in touch",
                     ];
                     return signals.some(s => body.includes(s));
                 }""")
@@ -1989,7 +2452,9 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
             else:
                 errors.append("Could not locate the submit button — review and submit manually.")
         elif captcha:
-            errors.append("CAPTCHA detected — solve it manually, then click Submit.")
+            errors.append("Solve the CAPTCHA manually, then click Submit.")
+        elif otp_detected:
+            errors.append("Enter the OTP code sent to you, then submit the form manually.")
 
         # ── Hide overlays, take screenshot ──
         await page.evaluate("""() => {
@@ -2015,13 +2480,20 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True) ->
         screenshot_b64=screenshot_b64,
         errors=errors,
         captcha_detected=captcha,
+        otp_detected=otp_detected,
         field_results=field_results,
     )
 
 
 # ─── Public API ──────────────────────────────────────────
 
-def fill_form(url: str, matches: list[dict], auto_submit: bool = True) -> FillResult:
+def fill_form(
+    url: str,
+    matches: list[dict],
+    auto_submit: bool = True,
+    profile: dict | None = None,
+) -> FillResult:
     """Synchronous wrapper — fill every field and submit the form.
+    Pass profile to enable conditional-field detection after each fill.
     Set auto_submit=False only if you want to review before submitting."""
-    return asyncio.run(_fill_form(url, matches, auto_submit=auto_submit))
+    return asyncio.run(_fill_form(url, matches, auto_submit=auto_submit, profile=profile))
