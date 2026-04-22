@@ -504,7 +504,7 @@ export default function FillFormPage() {
                     onClick={handleConfirmReview}
                     className="ml-auto bg-green/90 hover:bg-green text-white text-sm px-5 py-2.5 rounded-lg transition-colors font-medium"
                   >
-                    Submit Form
+                    {fillStats?.submitted ? "✓ Done" : "Submit Form"}
                   </button>
                 </div>
               </div>
