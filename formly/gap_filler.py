@@ -78,8 +78,11 @@ def try_autofill(fields: list[FieldMatch], page_context: str = "") -> tuple[list
             "label": f.label,
             "field_type": f.field_type,
         }
-        if f.note:
-            desc["options"] = f.note
+        # Always prefer the real options list over the LLM's note string
+        if f.options:
+            desc["options"] = f.options
+        elif f.note:
+            desc["context"] = f.note
         fields_desc.append(desc)
 
     prompt = f"""Page context: {page_context}
@@ -131,7 +134,10 @@ def generate_question(field: FieldMatch, page_context: str = "") -> str:
         label = "a required field"
 
     options_text = ""
-    if field.note and field.field_type in ("select", "radio"):
+    choice_types = ("select", "radio", "checkbox", "native_select", "autocomplete")
+    if field.options and field.field_type in choice_types:
+        options_text = f"\nAvailable options: {', '.join(field.options)}"
+    elif field.note and field.field_type in choice_types:
         options_text = f"\nAvailable options: {field.note}"
 
     prompt = f"""The user is filling out a form.
@@ -164,7 +170,10 @@ def generate_questions_batch(fields: list[FieldMatch], page_context: str = "") -
             label = f"required {f.field_type} field"
 
         desc = {"what_it_asks": label, "type": f.field_type}
-        if f.note and f.field_type in ("select", "radio"):
+        choice_types = ("select", "radio", "checkbox", "native_select", "autocomplete")
+        if f.options and f.field_type in choice_types:
+            desc["options"] = f.options
+        elif f.note and f.field_type in choice_types:
             desc["options"] = f.note
         fields_desc.append(desc)
 

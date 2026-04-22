@@ -108,6 +108,7 @@ def run_agent(url: str) -> list[AgentEvent]:
             "label": label,
             "field_type": m.field_type,
             "question": question,
+            "options": m.options,  # real options for select/radio/checkbox
         })
         events.append(AgentEvent("asking", question,
                                  {"selector": m.selector, "label": label, "field_type": m.field_type}))
@@ -195,7 +196,8 @@ def fill_with_answers(url: str, matches: list[dict], gap_answers: dict[str, str]
     events.append(AgentEvent("progress", "Agent is filling the form now..."))
 
     try:
-        result = fill_form(url, matches, auto_submit=True)
+        profile = db.get_full_profile()
+        result = fill_form(url, matches, auto_submit=True, profile=profile)
 
         # Build per-field results
         field_details = []
@@ -211,14 +213,21 @@ def fill_with_answers(url: str, matches: list[dict], gap_answers: dict[str, str]
 
         # Determine overall outcome
         captcha_hit = result.captcha_detected
-        submitted = not captcha_hit and result.filled > 0
+        otp_hit = getattr(result, "otp_detected", False)
+        blocked = captcha_hit or otp_hit
+        submitted = not blocked and result.filled > 0
 
-        summary = (
-            f"Filled {result.filled} fields across {result.pages_navigated} page(s)"
-            + (", submitted successfully." if submitted and not result.errors else
-               " — CAPTCHA detected, submit manually." if captcha_hit else
-               f" — {len(result.errors)} issue(s). Review before submitting.")
-        )
+        if submitted and not result.errors:
+            summary = f"Filled {result.filled} fields across {result.pages_navigated} page(s), submitted successfully."
+        elif otp_hit:
+            summary = f"Filled {result.filled} fields — OTP / verification code required. Check your email or phone."
+        elif captcha_hit:
+            summary = f"Filled {result.filled} fields — CAPTCHA detected. Solve it manually then submit."
+        else:
+            summary = (
+                f"Filled {result.filled} fields across {result.pages_navigated} page(s)"
+                + (f" — {len(result.errors)} issue(s). Review before submitting." if result.errors else ".")
+            )
 
         events.append(AgentEvent(
             "screenshot",
@@ -230,6 +239,7 @@ def fill_with_answers(url: str, matches: list[dict], gap_answers: dict[str, str]
                 "pages": result.pages_navigated,
                 "submitted": submitted,
                 "captcha": captcha_hit,
+                "otp": otp_hit,
                 "errors": result.errors,
                 "field_results": field_details,
             },
