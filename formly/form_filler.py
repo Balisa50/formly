@@ -448,6 +448,12 @@ async def _detect_field_type(page: Page, el: ElementHandle, declared_type: str,
         return "date_native"
     if itype == "time":
         return "time_native"
+    # Label-based time heuristic (catches text inputs styled as time pickers)
+    label_lower_early = (label or "").lower()
+    if any(kw in label_lower_early for kw in ("preferred time", "delivery time", "pickup time",
+                                               "appointment time", "meeting time", "schedule time",
+                                               "time slot", "arrival time", "departure time")):
+        return "time_native"
     if itype == "tel":
         return "phone"
     if itype == "email":
@@ -1675,14 +1681,22 @@ async def _fill_time_native(page: Page, el: ElementHandle, value: str,
     selector = await _get_selector(el)
     try:
         await el.scroll_into_view_if_needed()
-        # Normalise: strip seconds, ensure HH:MM
-        parts = value.strip().split(":")
+        # Normalise to HH:MM (24-hour) — handles "9:00 AM", "2:30 PM", "14:30", "09:00"
+        raw = value.strip()
+        am_pm_match = re.search(r"(am|pm)", raw, re.IGNORECASE)
+        parts = re.split(r"[:.]", re.sub(r"\s*(am|pm)", "", raw, flags=re.IGNORECASE).strip())
         if len(parts) >= 2:
-            hh = parts[0].zfill(2)
-            mm = parts[1][:2].zfill(2)
-            normalised = f"{hh}:{mm}"
+            hh = int(parts[0])
+            mm = int(re.sub(r"\D", "", parts[1][:2]) or "0")
+            if am_pm_match:
+                period = am_pm_match.group(1).lower()
+                if period == "am" and hh == 12:
+                    hh = 0
+                elif period == "pm" and hh != 12:
+                    hh += 12
+            normalised = f"{hh:02d}:{mm:02d}"
         else:
-            normalised = value.strip()
+            normalised = raw
         # Playwright's .fill() properly sets native time inputs
         await el.fill(normalised)
         await asyncio.sleep(0.3)
