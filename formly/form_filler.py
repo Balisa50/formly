@@ -1871,7 +1871,7 @@ _DANGER_NAV_WORDS = [
 
 async def _click_safe_next(page: Page) -> bool:
     """Click the first safe Next/Continue button. Never clicks Submit-like buttons."""
-    return bool(await page.evaluate("""(safeWords, dangerWords) => {
+    return bool(await page.evaluate("""([safeWords, dangerWords]) => {
         const btns = [...document.querySelectorAll(
             'button, input[type="button"], a[role="button"], [role="button"]'
         )];
@@ -1885,7 +1885,7 @@ async def _click_safe_next(page: Page) -> bool:
             if (safeWords.includes(text)) { btn.click(); return true; }
         }
         return false;
-    }""", _NEXT_SAFE_WORDS, _DANGER_NAV_WORDS))
+    }""", [_NEXT_SAFE_WORDS, _DANGER_NAV_WORDS]))
 
 
 async def _navigate_and_fill(
