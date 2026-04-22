@@ -446,6 +446,8 @@ async def _detect_field_type(page: Page, el: ElementHandle, declared_type: str,
         return "file"
     if itype == "date":
         return "date_native"
+    if itype == "time":
+        return "time_native"
     if itype == "tel":
         return "phone"
     if itype == "email":
@@ -804,6 +806,8 @@ async def _dispatch_fill(
         return await _fill_datepicker(page, el, value, label)
     if real_type == "date_native":
         return await _fill_date_native(page, el, value, label)
+    if real_type == "time_native":
+        return await _fill_time_native(page, el, value, label)
     if real_type == "date_text":
         return await _fill_datepicker(page, el, value, label)
     if real_type == "phone":
@@ -1660,6 +1664,35 @@ async def _fill_date_native(page: Page, el: ElementHandle, value: str,
         return FieldResult(label, selector, "date_native", value, "verified")
     except Exception as exc:
         return FieldResult(label, selector, "date_native", value, "error", str(exc)[:120])
+
+
+# ─── Time input (<input type="time">) ────────────────────
+
+async def _fill_time_native(page: Page, el: ElementHandle, value: str,
+                             label: str) -> FieldResult:
+    """Fill <input type="time"> using Playwright's .fill() which handles
+    the native time widget correctly. Normalises value to HH:MM format."""
+    selector = await _get_selector(el)
+    try:
+        await el.scroll_into_view_if_needed()
+        # Normalise: strip seconds, ensure HH:MM
+        parts = value.strip().split(":")
+        if len(parts) >= 2:
+            hh = parts[0].zfill(2)
+            mm = parts[1][:2].zfill(2)
+            normalised = f"{hh}:{mm}"
+        else:
+            normalised = value.strip()
+        # Playwright's .fill() properly sets native time inputs
+        await el.fill(normalised)
+        await asyncio.sleep(0.3)
+        # Verify
+        filled = await el.input_value()
+        if normalised in (filled or ""):
+            return FieldResult(label, selector, "time_native", normalised, "verified")
+        return FieldResult(label, selector, "time_native", normalised, "filled")
+    except Exception as exc:
+        return FieldResult(label, selector, "time_native", value, "error", str(exc)[:120])
 
 
 # ─── File upload ─────────────────────────────────────────
