@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -9,6 +10,8 @@ from typing import Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
+
+logger = logging.getLogger(__name__)
 
 from . import db
 from .config import UPLOADS_DIR
@@ -238,8 +241,9 @@ async def upload_cv(file: UploadFile = File(...)):
                 "languages": len(data.get("languages", [])),
             },
         }
-    except Exception as e:
-        raise HTTPException(500, f"Failed to parse CV: {e}")
+    except Exception:
+        logger.exception("CV parse failed")
+        raise HTTPException(500, "We couldn't read this PDF. It may be image-based, encrypted, or corrupted. Try a different file.")
 
 
 # ─── Work Experience ────────────────────────────────────
@@ -340,8 +344,9 @@ def scan_form(req: ScanRequest):
             "page_context": page_context,
             "count": len(fields),
         }
-    except Exception as e:
-        raise HTTPException(500, f"Failed to scan form: {e}")
+    except Exception:
+        logger.exception("Form scan failed")
+        raise HTTPException(500, "We couldn't open this form. The site might be blocking automated browsers, behind a login, or temporarily down. Try a different URL.")
 
 
 # ─── Field Matching ─────────────────────────────────────
@@ -393,8 +398,9 @@ def match_form_fields(req: MatchRequest):
             "needs_input": sum(1 for m in matches if m.match_type == "unknown"),
             "needs_essay": sum(1 for m in matches if m.needs_essay),
         }
-    except Exception as e:
-        raise HTTPException(500, f"Matching failed: {e}")
+    except Exception:
+        logger.exception("Match failed")
+        raise HTTPException(500, "We couldn't match this form's fields to your profile. The matching service may be temporarily overloaded — try again in a moment.")
 
 
 # ─── Auto-Fill (Smart Inference) ───────────────────────
@@ -500,8 +506,9 @@ def generate_essay(req: EssayRequest):
     try:
         essay = write_essay(req.prompt, req.page_context, req.max_length)
         return {"essay": essay}
-    except Exception as e:
-        raise HTTPException(500, f"Essay generation failed: {e}")
+    except Exception:
+        logger.exception("Essay generation failed")
+        raise HTTPException(500, "We couldn't draft that essay. The writing service may be rate-limited — try again in a minute.")
 
 
 # ─── Unified Agent ─────────────────────────────────────
@@ -524,8 +531,9 @@ def agent_start(req: AgentStartRequest):
     try:
         events = run_agent(req.url)
         return {"events": [e.to_dict() for e in events]}
-    except Exception as e:
-        raise HTTPException(500, f"Agent failed: {e}")
+    except Exception:
+        logger.exception("Agent start failed")
+        raise HTTPException(500, "The agent couldn't start on this URL. The site may be blocking automation or behind a login wall.")
 
 
 class AgentFillRequest(BaseModel):
@@ -548,8 +556,9 @@ def agent_fill(req: AgentFillRequest):
     try:
         events = fill_with_answers(req.url, req.matches, req.gap_answers)
         return {"events": [e.to_dict() for e in events]}
-    except Exception as e:
-        raise HTTPException(500, f"Agent fill failed: {e}")
+    except Exception:
+        logger.exception("Agent fill failed")
+        raise HTTPException(500, "Filling stopped before completion. The form may have changed since we read it — try opening it manually and refreshing.")
 
 
 # ─── Legacy Form Filling (kept for compatibility) ─────
@@ -578,8 +587,9 @@ def fill_form_endpoint(req: FillRequest):
             "screenshot": result.screenshot_b64,
             "errors": result.errors,
         }
-    except Exception as e:
-        raise HTTPException(500, f"Form filling failed: {e}")
+    except Exception:
+        logger.exception("Form fill failed")
+        raise HTTPException(500, "We hit a wall filling this form. Some sites detect automation — try opening it manually using the Open Form button.")
 
 
 # ─── Applications ───────────────────────────────────────
