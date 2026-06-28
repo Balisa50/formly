@@ -1,6 +1,6 @@
 """Vision-guided page understanding for the Formly agent.
 
-Uses Anthropic Claude vision (claude-opus-4-5) to observe a page screenshot
+Uses a vision-capable LLM (claude-opus-4-5) to observe a page screenshot
 and determine what state the form is in, what fields are visible, and what
 action to take next.
 
@@ -83,7 +83,7 @@ async def observe_screenshot(
     context: str = "",
     profile_hint: str = "",
 ) -> PageObservation:
-    """Send screenshot to Claude vision and return a PageObservation.
+    """Send screenshot to the vision model and return a PageObservation.
 
     Falls back to Groq text analysis if ANTHROPIC_API_KEY is not set.
     """
@@ -100,7 +100,7 @@ async def _observe_with_claude(
     context: str,
     profile_hint: str,
 ) -> PageObservation:
-    """Use Claude claude-opus-4-5 vision API."""
+    """Use the claude-opus-4-5 vision API."""
     try:
         import anthropic
     except ImportError:
