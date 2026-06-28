@@ -1,4 +1,4 @@
-"""Database layer — uses PostgreSQL (Supabase) in production, SQLite locally."""
+"""Database layer - uses PostgreSQL (Supabase) in production, SQLite locally."""
 from __future__ import annotations
 
 import json
@@ -229,7 +229,7 @@ def init_db() -> None:
             conn.executescript(SQLITE_SCHEMA)
             conn.close()
     except Exception as e:
-        print(f"[db] init_db warning: {e} — tables will be created on first request")
+        print(f"[db] init_db warning: {e} - tables will be created on first request")
 
 
 # ─── Profile ────────────────────────────────────────────
