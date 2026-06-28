@@ -23,7 +23,7 @@ async function request<T>(path: string, opts?: RequestInit, retries = 2): Promis
       return res.json();
     } catch (err) {
       if (attempt < retries) {
-        // Server might be waking up — wait and retry
+        // Server might be waking up - wait and retry
         await new Promise((r) => setTimeout(r, 5000));
         continue;
       }
@@ -93,7 +93,7 @@ export const api = {
   generateEssay: (prompt: string, page_context = "", max_length?: number) =>
     request<{ essay: string }>("/api/forms/essay", { method: "POST", body: JSON.stringify({ prompt, page_context, max_length }) }),
 
-  // Autonomous form filling — the agent actually fills the form
+  // Autonomous form filling - the agent actually fills the form
   fillForm: (url: string, matches: any[]) =>
     request<{ filled: number; skipped: number; pages_navigated: number; screenshot: string; errors: string[] }>("/api/forms/fill", { method: "POST", body: JSON.stringify({ url, matches }) }),
 
