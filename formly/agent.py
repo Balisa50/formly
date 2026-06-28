@@ -1,4 +1,4 @@
-"""The Formly Agent — autonomous form filling with live progress.
+"""The Formly Agent - autonomous form filling with live progress.
 
 Single entry point: give it a URL, it does everything.
 Returns progress events as it works, asks for missing info, fills gaps."""
@@ -78,7 +78,7 @@ def run_agent(url: str) -> list[AgentEvent]:
 
     if skipped:
         events.append(AgentEvent("progress",
-                                 f"{len(skipped)} file upload field{'s' if len(skipped) > 1 else ''} — you'll handle manually."))
+                                 f"{len(skipped)} file upload field{'s' if len(skipped) > 1 else ''} - you'll handle manually."))
 
     # Step 3: Try to auto-infer unknown fields
     if unknown:
@@ -220,13 +220,13 @@ def fill_with_answers(url: str, matches: list[dict], gap_answers: dict[str, str]
         if submitted and not result.errors:
             summary = f"Filled {result.filled} fields across {result.pages_navigated} page(s), submitted successfully."
         elif otp_hit:
-            summary = f"Filled {result.filled} fields — OTP / verification code required. Check your email or phone."
+            summary = f"Filled {result.filled} fields - OTP / verification code required. Check your email or phone."
         elif captcha_hit:
-            summary = f"Filled {result.filled} fields — CAPTCHA detected. Solve it manually then submit."
+            summary = f"Filled {result.filled} fields - CAPTCHA detected. Solve it manually then submit."
         else:
             summary = (
                 f"Filled {result.filled} fields across {result.pages_navigated} page(s)"
-                + (f" — {len(result.errors)} issue(s). Review before submitting." if result.errors else ".")
+                + (f" - {len(result.errors)} issue(s). Review before submitting." if result.errors else ".")
             )
 
         events.append(AgentEvent(
