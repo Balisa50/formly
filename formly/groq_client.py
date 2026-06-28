@@ -17,9 +17,9 @@ from .config import GROQ_API_KEY
 API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # Ordered by reliability on free tier:
-#   8b-instant   — fastest, most reliable, rarely rate-limited
-#   gemma2-9b-it — solid alternative, separate quota pool
-#   70b-versatile — nicer prose when it works, but flakiest
+#   8b-instant   - fastest, most reliable, rarely rate-limited
+#   gemma2-9b-it - solid alternative, separate quota pool
+#   70b-versatile - nicer prose when it works, but flakiest
 MODELS = [
     "llama-3.1-8b-instant",
     "gemma2-9b-it",
@@ -115,7 +115,7 @@ def chat(
 ) -> str:
     """Send a chat completion request. Tries multiple models for reliability.
 
-    The legacy `model` parameter is ignored — we always use the fallback
+    The legacy `model` parameter is ignored - we always use the fallback
     chain because pinning to one model caused production outages.
     """
     last_error = ""
@@ -148,7 +148,7 @@ def chat(
             if not _looks_like_garbage(content):
                 return content
 
-            # Garbage response — remember and try next model (no retry)
+            # Garbage response - remember and try next model (no retry)
             last_garbage_preview = content[:80]
             last_error = (
                 f"{model_name} returned garbage "
@@ -157,7 +157,7 @@ def chat(
             last_model = model_name
             break
 
-    # Exhausted — raise with everything we know
+    # Exhausted - raise with everything we know
     if last_garbage_preview:
         raise RuntimeError(
             f"All Groq models failed. Last: {last_model} "
