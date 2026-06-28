@@ -1,4 +1,4 @@
-"""Smart gap-filling — the agent tries to answer fields itself before asking the user.
+"""Smart gap-filling - the agent tries to answer fields itself before asking the user.
 
 Priority order:
 1. Auto-infer from existing profile (e.g., country from phone, gender from name)
@@ -35,7 +35,7 @@ For each field, return:
   "reason": "why you chose this value or why you can't"
 }
 
-Be smart but accurate. Don't guess wildly — if you're <50% confident, set can_autofill=false.
+Be smart but accurate. Don't guess wildly - if you're <50% confident, set can_autofill=false.
 Return a JSON array."""
 
 QUESTION_SYSTEM = """You are a warm, helpful assistant filling out a form with someone. You need to ask them for specific information.
@@ -45,11 +45,11 @@ Rules:
 - Ask about the actual information needed, not the field name
 - Be specific about what format you need
 - If there are options to choose from, list them clearly
-- Be brief — one or two sentences max
+- Be brief - one or two sentences max
 - Reference the actual form purpose
 
 Good examples:
-- "This form asks for your subjects or courses — what subjects would you like to select?"
+- "This form asks for your subjects or courses - what subjects would you like to select?"
 - "They need your date of birth. What's your date of birth?"
 - "What's your current CGPA on a 4.0 scale?"
 - "Which gender should I select? Options: Male, Female, Prefer not to say"
@@ -125,7 +125,7 @@ Try to infer the correct value for each field from the profile context. Be smart
 
 
 def generate_question(field: FieldMatch, page_context: str = "") -> str:
-    """Generate a natural, human-readable question — NEVER shows selectors or technical details."""
+    """Generate a natural, human-readable question - NEVER shows selectors or technical details."""
 
     # Build a clean description of what we need
     label = field.label
@@ -162,7 +162,7 @@ def generate_questions_batch(fields: list[FieldMatch], page_context: str = "") -
     if not fields:
         return []
 
-    # Clean up field descriptions — never expose selectors
+    # Clean up field descriptions - never expose selectors
     fields_desc = []
     for f in fields:
         label = f.label
