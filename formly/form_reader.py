@@ -92,7 +92,7 @@ async def _scroll_entire_page(page: Page) -> None:
     await page.wait_for_timeout(500)
 
 
-# Known ATS iframe domains — when an iframe's URL contains one of these we
+# Known ATS iframe domains - when an iframe's URL contains one of these we
 # know we're inside an applicant-tracking system and must scan that frame.
 _ATS_DOMAINS = (
     "myworkdayjobs.com", "workday.com",
@@ -173,7 +173,7 @@ def _postprocess_fields(
             frame_url=frame_url,
         ))
 
-    # Deduplicate labels — append context suffix when the same label appears twice
+    # Deduplicate labels - append context suffix when the same label appears twice
     label_counts: dict[str, int] = {}
     for f in fields:
         label_counts[f.label] = label_counts.get(f.label, 0) + 1
@@ -617,13 +617,13 @@ async def _read_fields(url: str) -> tuple[list[FormField], str]:
             try:
                 frame_data = await frame.evaluate(_FIELD_EXTRACTION_JS)
                 frame_fields = _postprocess_fields(frame_data, page_title, frame_url=furl)
-                # Merge — deduplicate by (label, field_type) against main-frame fields
+                # Merge - deduplicate by (label, field_type) against main-frame fields
                 main_labels = {(f.label.lower(), f.field_type) for f in fields}
                 for ff in frame_fields:
                     if (ff.label.lower(), ff.field_type) not in main_labels:
                         fields.append(ff)
             except Exception:
-                pass  # Frame navigated away or cross-origin block — skip silently
+                pass  # Frame navigated away or cross-origin block - skip silently
 
 
         await browser.close()
