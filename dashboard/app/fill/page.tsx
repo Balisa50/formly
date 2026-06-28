@@ -462,7 +462,7 @@ export default function FillFormPage() {
                                 ))}
                               </select>
                               <p className="text-xs text-accent mt-1">
-                                Agent needs you to pick one of these — then click Re-fill.
+                                Agent needs you to pick one of these - then click Re-fill.
                               </p>
                             </div>
                           );
@@ -539,9 +539,9 @@ export default function FillFormPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                 </svg>
                 <div className="flex-1">
-                  <p className="text-sm font-semibold text-red-400">CAPTCHA detected — manual step required</p>
+                  <p className="text-sm font-semibold text-red-400">CAPTCHA detected - manual step required</p>
                   <p className="text-xs text-red-300/80 mt-0.5">
-                    All fields were filled. Click <strong className="text-red-300">Open Form to Finish</strong> — the form will open in your browser. Solve the CAPTCHA and click Submit.
+                    All fields were filled. Click <strong className="text-red-300">Open Form to Finish</strong> - the form will open in your browser. Solve the CAPTCHA and click Submit.
                   </p>
                 </div>
               </div>
@@ -556,7 +556,7 @@ export default function FillFormPage() {
                 <div className="flex-1">
                   <p className="text-sm font-semibold text-amber-400">OTP / Verification code required</p>
                   <p className="text-xs text-amber-300/80 mt-0.5">
-                    All fields were filled. Click <strong className="text-amber-300">Open Form to Finish</strong> — the form will open in your browser. Enter the verification code sent to your email or phone, then click Submit.
+                    All fields were filled. Click <strong className="text-amber-300">Open Form to Finish</strong> - the form will open in your browser. Enter the verification code sent to your email or phone, then click Submit.
                   </p>
                 </div>
               </div>
