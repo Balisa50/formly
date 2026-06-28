@@ -27,7 +27,7 @@ CRITICAL RULES:
 1. The "value" field must ALWAYS be a real human-readable value (a name, email, date, etc.)
 2. NEVER put CSS selectors (#something, .something, input[...]) as a value
 3. NEVER put technical identifiers as values
-4. If you don't know the value, set value=null — do NOT guess with technical garbage
+4. If you don't know the value, set value=null - do NOT guess with technical garbage
 5. For selection/radio/autocomplete fields with options listed, the value MUST be one of the provided options. NEVER invent values that aren't in the options list.
 6. Phone numbers should be just digits for "10 Digits" fields (no + prefix)
 7. For checkbox fields, return a COMMA-SEPARATED list of option labels to check. Match the user's hobbies/interests/skills to the closest available checkbox options.
@@ -35,7 +35,7 @@ CRITICAL RULES:
 9. For "Subjects" autocomplete fields: if options are listed, pick from those options. If the user has skills/education fields, match them to available subject options.
 10. For cascading "State and City" fields: use the user's address to determine state and city.
 
-Return ONLY valid JSON — an array of objects:
+Return ONLY valid JSON - an array of objects:
 [
   {
     "selector": "the CSS selector of the field",
@@ -55,13 +55,13 @@ Match types:
 - "selection": dropdown/radio where you pick the best option from the list
 - "essay": textarea needing a written response (personal statement, cover letter, etc.)
 - "file": file upload field (usually CV/resume)
-- "unknown": cannot match — user needs to provide this
+- "unknown": cannot match - user needs to provide this
 
 For selection fields, pick the option that best matches the profile data.
 For essay fields, set needs_essay=true and value=null.
 For unknown fields, set value=null and confidence=0.
 
-Be generous with matching — use the full profile context to find answers.
+Be generous with matching - use the full profile context to find answers.
 Try hard to match EVERY field. Only mark as "unknown" if you truly cannot infer it."""
 
 
@@ -137,10 +137,10 @@ def _fix_phone_for_digit_requirement(value: str, label: str, profile: dict) -> s
     digits_only = re.sub(r"\D", "", value)
 
     if len(digits_only) >= required_digits:
-        # Too many digits — keep the rightmost N (strips country code prefix)
+        # Too many digits - keep the rightmost N (strips country code prefix)
         return digits_only[-required_digits:]
 
-    # Phone is shorter than required — zero-pad on the left
+    # Phone is shorter than required - zero-pad on the left
     return digits_only.zfill(required_digits)
 
 
@@ -160,7 +160,7 @@ def _normalize_date(value: str) -> str:
         except ValueError:
             continue
 
-    # Couldn't parse — return original
+    # Couldn't parse - return original
     return value
 
 
@@ -250,7 +250,7 @@ Match each form field to the appropriate profile data. Return the JSON array."""
         if value and _is_date_field(label, profile_key, field_type):
             value = _normalize_date(value)
 
-        # Skip file upload fields — agent can't handle these
+        # Skip file upload fields - agent can't handle these
         if field_type == "file":
             matches.append(FieldMatch(
                 selector=m["selector"],
@@ -260,7 +260,7 @@ Match each form field to the appropriate profile data. Return the JSON array."""
                 profile_key=None,
                 value=None,
                 confidence=0,
-                note="File upload — must be done manually on the form",
+                note="File upload - must be done manually on the form",
             ))
             continue
 
@@ -283,7 +283,7 @@ Match each form field to the appropriate profile data. Return the JSON array."""
             if matched_opt:
                 value = matched_opt   # normalise to exact option text
             else:
-                value = None          # hallucinated option — ask user instead
+                value = None          # hallucinated option - ask user instead
 
         matches.append(FieldMatch(
             selector=m["selector"],
