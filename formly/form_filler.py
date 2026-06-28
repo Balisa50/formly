@@ -5,7 +5,7 @@ user's stored profile. Handles dropdowns, React Select, radios,
 checkboxes, date pickers, multi-page forms, cookie popups, and
 dynamic fields. Uses human-like delays and stealth to avoid detection.
 
-v2 — Intelligent field-type detection, per-field verification, calendar
+v2 - Intelligent field-type detection, per-field verification, calendar
 navigation, cascading dropdown awareness, phone format parsing, and
 file-upload escalation."""
 from __future__ import annotations
@@ -67,7 +67,7 @@ def _short_pause() -> float:
     return random.uniform(0.15, 0.4)
 
 
-# ─── Page analysis — scroll & map the form ───────────────
+# ─── Page analysis - scroll & map the form ───────────────
 
 async def _full_page_scan(page: Page) -> list[dict]:
     """Scroll the entire page top-to-bottom and return a map of all
@@ -81,7 +81,7 @@ async def _full_page_scan(page: Page) -> list[dict]:
         await page.evaluate(f"window.scrollTo(0, {pos})")
         await asyncio.sleep(random.uniform(0.25, 0.5))
         pos += int(viewport_h * 0.7)
-        # Re-check — page may have grown
+        # Re-check - page may have grown
         scroll_h = await page.evaluate("document.body.scrollHeight")
 
     # Back to top
@@ -239,7 +239,7 @@ async def _dismiss_popups(page: Page):
 # ─── CAPTCHA detection ───────────────────────────────────
 
 async def _check_captcha(page: Page) -> bool:
-    """Detect REAL form CAPTCHAs — not just ads or scripts."""
+    """Detect REAL form CAPTCHAs - not just ads or scripts."""
     return await page.evaluate("""() => {
         const captchaFrame = document.querySelector(
             'iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/api2/bframe"], ' +
@@ -704,7 +704,7 @@ def _quick_profile_match(
     options: list[str],
     profile: dict,
 ) -> str | None:
-    """Fast keyword-based profile lookup for conditional fields — no LLM needed.
+    """Fast keyword-based profile lookup for conditional fields - no LLM needed.
     Works for the common fields that appear after conditional logic fires."""
     if not profile or not label:
         return None
@@ -907,12 +907,12 @@ async def _fill_phone(page: Page, el: ElementHandle, value: str, label: str) -> 
             digit_req = int(digit_match.group(1))
 
         if digit_req:
-            # Field explicitly requires N digits — respect it exactly
+            # Field explicitly requires N digits - respect it exactly
             if len(digits_only) > digit_req:
-                # Too many digits — strip from the left (remove country code)
+                # Too many digits - strip from the left (remove country code)
                 digits_only = digits_only[-digit_req:]
             elif len(digits_only) < digit_req:
-                # Too few digits — zero-pad on the left (do NOT add country code)
+                # Too few digits - zero-pad on the left (do NOT add country code)
                 digits_only = digits_only.zfill(digit_req)
             formatted = digits_only
         elif maxlength and maxlength.isdigit():
@@ -954,7 +954,7 @@ async def _fill_native_select(page: Page, el: ElementHandle, value: str,
         try:
             await el.select_option(label=value)
         except Exception:
-            # Fuzzy match — note: el.evaluate receives (element, arg) so params are (el, val)
+            # Fuzzy match - note: el.evaluate receives (element, arg) so params are (el, val)
             matched = await el.evaluate("""(el, val) => {
                 const opts = [...el.options];
                 const match = opts.find(o =>
@@ -974,7 +974,7 @@ async def _fill_native_select(page: Page, el: ElementHandle, value: str,
 
         await asyncio.sleep(0.5)
 
-        # Verify displayed value — el.evaluate passes element as first arg
+        # Verify displayed value - el.evaluate passes element as first arg
         displayed = await el.evaluate("el => { const opt = el.options[el.selectedIndex]; return opt ? opt.text.trim() : ''; }")
         if displayed and value.lower() in displayed.lower():
             return FieldResult(label, selector, "native_select", value, "verified")
@@ -1102,7 +1102,7 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
         }"""
 
         for attempt_val in search_attempts:
-            # Clear previous input — keyboard goes to whatever element has focus in
+            # Clear previous input - keyboard goes to whatever element has focus in
             # the browser (works cross-frame because it's OS-level input)
             await page.keyboard.press("Control+a")
             await page.keyboard.press("Backspace")
@@ -1116,7 +1116,7 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
             # WAIT for suggestions dropdown to appear
             await asyncio.sleep(1.5)
 
-            # el.evaluate runs in the element's frame — works for iframes too
+            # el.evaluate runs in the element's frame - works for iframes too
             result = await el.evaluate(CLICK_OPTION_JS, attempt_val)
 
             if result:
@@ -1174,7 +1174,7 @@ async def _fill_react_select_field(page: Page, el: ElementHandle, value: str,
                 return FieldResult(label, selector, "react_select", clicked_text or value, "verified")
             return FieldResult(label, selector, "react_select", clicked_text or value, "filled")
 
-        # NO option found at all — close dropdown, report error
+        # NO option found at all - close dropdown, report error
         await page.keyboard.press("Escape")
         await asyncio.sleep(0.3)
         return FieldResult(label, selector, "react_select", value, "error",
@@ -1192,7 +1192,7 @@ async def _fill_react_select_by_label(
 ) -> Optional[FieldResult]:
     """Find a React Select near a label and fill it. Returns None if not found.
 
-    ``ctx`` is the DOM context for queries — may be a Frame for ATS iframes.
+    ``ctx`` is the DOM context for queries - may be a Frame for ATS iframes.
     ``page`` is ALWAYS the top-level Page used for keyboard operations
     (``Frame`` has no ``.keyboard`` attribute).
     """
@@ -1267,7 +1267,7 @@ async def _fill_radio(page: Page, selector: str, label: str, value: str) -> Fiel
     except Exception:
         pass
 
-    # Strategy 1b: get_by_text — click the label text directly
+    # Strategy 1b: get_by_text - click the label text directly
     try:
         loc = page.get_by_text(value, exact=True)
         if await loc.count() > 0:
@@ -1459,7 +1459,7 @@ def _parse_date_value(value: str) -> tuple[int, int, int] | None:
         elif b > 12:
             return (b, a, c)  # MM/DD/YYYY
         else:
-            return (a, b, c)  # Ambiguous — assume DD/MM/YYYY
+            return (a, b, c)  # Ambiguous - assume DD/MM/YYYY
     return None
 
 
@@ -1544,7 +1544,7 @@ async def _fill_datepicker(page: Page, el: ElementHandle, value: str,
                     if target_month_name.lower() in header_text.lower() and str(year) in header_text:
                         break
 
-                    # Determine direction — parse current month/year from header
+                    # Determine direction - parse current month/year from header
                     current_year = None
                     current_month = None
                     for i, mn in enumerate(_MONTH_NAMES):
@@ -1681,7 +1681,7 @@ async def _fill_time_native(page: Page, el: ElementHandle, value: str,
     selector = await _get_selector(el)
     try:
         await el.scroll_into_view_if_needed()
-        # Normalise to HH:MM (24-hour) — handles "9:00 AM", "2:30 PM", "14:30", "09:00"
+        # Normalise to HH:MM (24-hour) - handles "9:00 AM", "2:30 PM", "14:30", "09:00"
         raw = value.strip()
         am_pm_match = re.search(r"(am|pm)", raw, re.IGNORECASE)
         parts = re.split(r"[:.]", re.sub(r"\s*(am|pm)", "", raw, flags=re.IGNORECASE).strip())
@@ -1790,7 +1790,7 @@ async def _handle_file_upload(page: Page, el: Optional[ElementHandle], value: st
             file_input = await page.query_selector(selector)
 
         if not file_input:
-            # Ordered selector list — most specific first
+            # Ordered selector list - most specific first
             candidates = [
                 'input[type="file"]',
                 '#uploadPicture', '#uploadCV', '#uploadResume',
@@ -1868,7 +1868,7 @@ async def _wait_for_cascade(page: Page, timeout: float = 5.0) -> None:
         await page.wait_for_load_state("networkidle", timeout=int(timeout * 1000))
         return
     except Exception:
-        pass  # Not a network-driven cascade — fall through to DOM polling
+        pass  # Not a network-driven cascade - fall through to DOM polling
 
     # DOM polling: watch for new <option> or [role="option"] elements appearing
     deadline = asyncio.get_event_loop().time() + timeout
@@ -1883,7 +1883,7 @@ async def _wait_for_cascade(page: Page, timeout: float = 5.0) -> None:
                 document.querySelectorAll('option, [role="option"]').length
             )""")
             if curr_count > prev_count:
-                # New options appeared — give them a moment to fully render
+                # New options appeared - give them a moment to fully render
                 await asyncio.sleep(0.3)
                 return
         except Exception:
@@ -2171,7 +2171,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, pr
         await _dismiss_popups(page)
         await asyncio.sleep(_human_delay())
 
-        # ── Step 2: Full page scan — scroll top to bottom ──
+        # ── Step 2: Full page scan - scroll top to bottom ──
         await _full_page_scan(page)
         await asyncio.sleep(0.5)
 
@@ -2252,7 +2252,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, pr
                     field_results.append(fr)
                     if fr.status in ("filled", "verified"):
                         filled += 1
-                        # Cascading wait — poll until dependent options appear or timeout
+                        # Cascading wait - poll until dependent options appear or timeout
                         label_lower = label.lower()
                         if any(kw in label_lower for kw in ("state", "country", "province", "region")):
                             await _wait_for_cascade(page)
@@ -2383,7 +2383,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, pr
                     fr = await _fill_date_native(page, el, value, label)
 
                 elif real_type == "date_text":
-                    # Date in a plain text field — try calendar first, fall back to JS
+                    # Date in a plain text field - try calendar first, fall back to JS
                     fr = await _fill_datepicker(page, el, value, label)
 
                 elif real_type == "phone":
@@ -2439,7 +2439,7 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, pr
                 skipped += 1
                 errors.append(f"{label}: {str(e)[:120]}")
 
-        # ── Final conditional scan — catch anything triggered by the last field ──
+        # ── Final conditional scan - catch anything triggered by the last field ──
         if profile:
             cf_filled, cf_skipped = await _scan_and_fill_new_fields(
                 page, seen_selectors, profile, errors, field_results
@@ -2460,10 +2460,10 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, pr
             captcha = await _check_captcha(page)
 
         if captcha:
-            errors.append("CAPTCHA detected — solve it manually, then click Submit.")
+            errors.append("CAPTCHA detected - solve it manually, then click Submit.")
 
         if otp_detected:
-            errors.append("OTP / verification code required — check your email or phone and enter the code.")
+            errors.append("OTP / verification code required - check your email or phone and enter the code.")
 
         # ── Validation check ──
         validation_errors = await _check_validation(page)
@@ -2510,9 +2510,9 @@ async def _fill_form(url: str, matches: list[dict], auto_submit: bool = True, pr
                 if confirmed:
                     errors = [e for e in errors if "submit" not in e.lower()]
                 else:
-                    errors.append("Form submitted — no confirmation page detected. Verify manually.")
+                    errors.append("Form submitted - no confirmation page detected. Verify manually.")
             else:
-                errors.append("Could not locate the submit button — review and submit manually.")
+                errors.append("Could not locate the submit button - review and submit manually.")
         elif captcha:
             errors.append("Solve the CAPTCHA manually, then click Submit.")
         elif otp_detected:
@@ -2540,7 +2540,7 @@ def fill_form(
     auto_submit: bool = True,
     profile: dict | None = None,
 ) -> FillResult:
-    """Synchronous wrapper — fill every field and submit the form.
+    """Synchronous wrapper - fill every field and submit the form.
     Pass profile to enable conditional-field detection after each fill.
     Set auto_submit=False only if you want to review before submitting."""
     return asyncio.run(_fill_form(url, matches, auto_submit=auto_submit, profile=profile))
