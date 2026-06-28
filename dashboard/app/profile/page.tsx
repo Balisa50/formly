@@ -220,7 +220,7 @@ export default function ProfilePage() {
           <textarea
             className="input"
             rows={4}
-            placeholder="A short summary about yourself — used for cover letters and personal statements."
+            placeholder="A short summary about yourself - used for cover letters and personal statements."
             value={bio}
             onChange={(e) => setBio(e.target.value)}
           />
@@ -318,7 +318,7 @@ export default function ProfilePage() {
             <textarea
               className="input"
               rows={3}
-              placeholder="Responsibilities — what did you do there?"
+              placeholder="Responsibilities - what did you do there?"
               value={newWork.description}
               onChange={(e) => setNewWork({ ...newWork, description: e.target.value })}
             />
