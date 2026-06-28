@@ -360,7 +360,7 @@ async def fill_login(page: Page, email: str, password: str) -> bool:
             await pass_sel.fill(password)
             await asyncio.sleep(0.2)
 
-        # Submit — try button first, then Enter
+        # Submit - try button first, then Enter
         submit_btn = await page.query_selector(
             'button[type="submit"], input[type="submit"], '
             'button:has-text("Sign in"), button:has-text("Log in"), '
@@ -379,7 +379,7 @@ async def fill_login(page: Page, email: str, password: str) -> bool:
 
 # ─── Navigation helpers ──────────────────────────────────────────────────────
 
-# Words that mean "go to next step" — safe to click
+# Words that mean "go to next step" - safe to click
 _NEXT_WORDS = {
     "next", "continue", "proceed", "forward", "go", "advance",
     "next step", "continue to", "next page", "save and continue",
