@@ -71,7 +71,7 @@ export default function HistoryPage() {
           </div>
           <p className="font-medium mb-2">No applications yet</p>
           <p className="text-sm text-text-muted mb-5 max-w-sm mx-auto">
-            Every form you fill will be tracked here — the URL, what was filled, and when.
+            Every form you fill will be tracked here - the URL, what was filled, and when.
           </p>
           <Link href="/fill" className="inline-flex bg-accent hover:bg-accent-hover text-white text-sm px-5 py-2.5 rounded-lg transition-colors">
             Fill a Form
@@ -92,7 +92,7 @@ export default function HistoryPage() {
             <div className="bg-surface rounded-xl border border-border p-4">
               <p className="text-xs text-text-muted">Completion Rate</p>
               <p className="text-xl font-bold">
-                {apps.length > 0 ? `${Math.round((submitted / apps.length) * 100)}%` : "—"}
+                {apps.length > 0 ? `${Math.round((submitted / apps.length) * 100)}%` : "-"}
               </p>
             </div>
           </div>
