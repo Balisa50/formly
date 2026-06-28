@@ -78,7 +78,7 @@ export default function WakeUp({ brandName, accentPart, onReady }: Props) {
       ) : (
         <>
           <p className="text-text-secondary text-sm mb-4">
-            Taking a little longer than usual — hang tight.
+            Taking a little longer than usual - hang tight.
           </p>
           <button
             onClick={handleRetry}
