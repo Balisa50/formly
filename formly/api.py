@@ -1,4 +1,4 @@
-"""Formly — FastAPI REST API wrapping all modules."""
+"""Formly - FastAPI REST API wrapping all modules."""
 from __future__ import annotations
 
 import json
@@ -325,7 +325,7 @@ class ScanRequest(BaseModel):
 @app.post("/api/forms/scan")
 def scan_form(req: ScanRequest):
     if not PLAYWRIGHT_AVAILABLE:
-        raise HTTPException(503, "Form scanning is temporarily unavailable — Playwright browser not installed on this server.")
+        raise HTTPException(503, "Form scanning is temporarily unavailable - Playwright browser not installed on this server.")
     try:
         fields, page_context = read_form(req.url)
         return {
@@ -400,7 +400,7 @@ def match_form_fields(req: MatchRequest):
         }
     except Exception:
         logger.exception("Match failed")
-        raise HTTPException(500, "We couldn't match this form's fields to your profile. The matching service may be temporarily overloaded — try again in a moment.")
+        raise HTTPException(500, "We couldn't match this form's fields to your profile. The matching service may be temporarily overloaded - try again in a moment.")
 
 
 # ─── Auto-Fill (Smart Inference) ───────────────────────
@@ -508,7 +508,7 @@ def generate_essay(req: EssayRequest):
         return {"essay": essay}
     except Exception:
         logger.exception("Essay generation failed")
-        raise HTTPException(500, "We couldn't draft that essay. The writing service may be rate-limited — try again in a minute.")
+        raise HTTPException(500, "We couldn't draft that essay. The writing service may be rate-limited - try again in a minute.")
 
 
 # ─── Unified Agent ─────────────────────────────────────
@@ -524,9 +524,9 @@ class AgentStartRequest(BaseModel):
 
 @app.post("/api/agent/start")
 def agent_start(req: AgentStartRequest):
-    """Start the agent — reads form, matches profile, reports what it can fill and what it needs."""
+    """Start the agent - reads form, matches profile, reports what it can fill and what it needs."""
     if not PLAYWRIGHT_AVAILABLE:
-        raise HTTPException(503, "Agent unavailable — browser not installed")
+        raise HTTPException(503, "Agent unavailable - browser not installed")
     from .agent import run_agent
     try:
         events = run_agent(req.url)
@@ -551,14 +551,14 @@ class AgentFillRequest(BaseModel):
 def agent_fill(req: AgentFillRequest):
     """Agent fills the form with all matches + user's gap answers."""
     if not PLAYWRIGHT_AVAILABLE:
-        raise HTTPException(503, "Agent unavailable — browser not installed")
+        raise HTTPException(503, "Agent unavailable - browser not installed")
     from .agent import fill_with_answers
     try:
         events = fill_with_answers(req.url, req.matches, req.gap_answers)
         return {"events": [e.to_dict() for e in events]}
     except Exception:
         logger.exception("Agent fill failed")
-        raise HTTPException(500, "Filling stopped before completion. The form may have changed since we read it — try opening it manually and refreshing.")
+        raise HTTPException(500, "Filling stopped before completion. The form may have changed since we read it - try opening it manually and refreshing.")
 
 
 # ─── Legacy Form Filling (kept for compatibility) ─────
@@ -575,9 +575,9 @@ class FillRequest(BaseModel):
 
 @app.post("/api/forms/fill")
 def fill_form_endpoint(req: FillRequest):
-    """Legacy endpoint — use /api/agent/fill instead."""
+    """Legacy endpoint - use /api/agent/fill instead."""
     if not PLAYWRIGHT_AVAILABLE:
-        raise HTTPException(503, "Form filling unavailable — browser not installed")
+        raise HTTPException(503, "Form filling unavailable - browser not installed")
     try:
         result = execute_fill(req.url, req.matches)
         return {
@@ -589,7 +589,7 @@ def fill_form_endpoint(req: FillRequest):
         }
     except Exception:
         logger.exception("Form fill failed")
-        raise HTTPException(500, "We hit a wall filling this form. Some sites detect automation — try opening it manually using the Open Form button.")
+        raise HTTPException(500, "We hit a wall filling this form. Some sites detect automation - try opening it manually using the Open Form button.")
 
 
 # ─── Applications ───────────────────────────────────────
