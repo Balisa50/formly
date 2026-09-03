@@ -10,14 +10,14 @@ Autonomous AI agent that fills any online application form on your behalf. Job a
 
 2. **Paste any form URL** - Formly opens it with Playwright, reads every field (label, type, options, character limits), and understands what the form is asking for.
 
-3. **Intelligent matching** - Groq LLaMA 3 semantically matches form fields to your profile data. "Academic Background" maps to education. "Previous Employment" maps to work history. Context, not keywords.
+3. **Field matching** - An LLM matches form fields to your profile data by meaning rather than by exact label, so "Academic Background" reaches education and "Previous Employment" reaches work history.
 
 4. **Conversational gap filling** - When information is missing, Formly asks naturally:
    > "This scholarship wants your National ID number - I don't have that yet. What is it?"
 
    Every answer is saved permanently. The same question is never asked twice.
 
-5. **Tailored essay generation** - For personal statements and open-ended questions, Formly writes specific responses referencing the actual opportunity and your real background. No generic filler.
+5. **Essay generation** - For personal statements and open-ended questions, Formly drafts a response that references the specific opportunity and the background already in your profile.
 
 6. **Human review gate** - Full preview of every filled field before anything is submitted. Edit any answer. You explicitly approve.
 
@@ -28,30 +28,33 @@ Autonomous AI agent that fills any online application form on your behalf. Job a
 ```
 formly/
     formly/
+        api.py             # FastAPI app the dashboard talks to
+        agent.py           # Orchestrates a fill: read, match, ask, write
         config.py          # Paths, env, constants
-        db.py              # SQLite profile DB (grows with every form)
-        groq_client.py     # Groq REST API wrapper
-        cv_parser.py       # PDF CV -> structured profile via LLM
+        db.py              # Profile store, grows with every form
+        groq_client.py     # LLM REST wrapper
+        cv_parser.py       # PDF CV to structured profile via LLM
         form_reader.py     # Playwright form field extraction
+        vision_agent.py    # Screenshot fallback when the DOM is unreadable
         matcher.py         # LLM semantic field matching
         gap_filler.py      # Conversational Q&A for missing data
-        essay_writer.py    # Tailored essay/statement generation
-        submitter.py       # Playwright form filling + submission
-    pages/
-        1_Profile.py       # Profile management UI
-        2_Fill_Form.py     # Chat-driven form filling flow
-        3_History.py       # Application log dashboard
-    app.py                 # Streamlit entry point
+        essay_writer.py    # Essay and personal statement generation
+        form_filler.py     # Playwright form filling and submission
+    dashboard/             # Next.js UI
+        app/profile/       # Profile management
+        app/fill/          # The form-filling flow
+        app/history/       # Application log
+    Dockerfile             # Deploys to Render
 ```
 
 ### Why Conversational Gap Filling?
 
-Most form-filling tools fail silently on unknown fields or dump a list of 30 questions at once. Formly asks one question at a time, naturally, like a helpful assistant. This is a deliberate design choice:
+A form will always contain something the profile has never seen. The options are to skip the field, to fail, or to ask. Formly asks, one question at a time, at the point the field comes up:
 
-- **One question at a time** - Feels like a conversation, not a survey
-- **Context-aware questions** - References the specific form and what it's asking for
-- **Permanent memory** - Every answer is saved to the profile DB. Fill 5 forms and by the 6th, Formly rarely needs to ask anything
-- **No duplicates** - If you told Formly your CGPA once, it's stored forever
+- **One question at a time**, rather than a list of thirty at the start
+- **The question names the form**, so it is clear what the answer is for
+- **Answers are written back to the profile**, so the same field is only ever asked once
+- **The profile grows with use.** By the sixth form there is usually nothing left to ask
 
 ### Database Design
 
